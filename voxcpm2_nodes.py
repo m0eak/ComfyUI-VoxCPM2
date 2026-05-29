@@ -507,12 +507,16 @@ class VoxCPM2CloneNode(io.ComfyNode):
 
 class VoxCPMExtension(ComfyExtension):
     async def get_node_list(self) -> List[type[io.ComfyNode]]:
+        from .voxcpm2_srt_nodes import VoxCPM2SRTBatchTTSNode, VoxCPM2SRTParserNode
+
         return [
             VoxCPM2TTSNode,
             VoxCPM2CloneNode,
             VoxCPM_TrainConfig,
             VoxCPM_DatasetMaker,
             VoxCPM_LoraTrainer,
+            VoxCPM2SRTParserNode,
+            VoxCPM2SRTBatchTTSNode,
         ]
 
 async def comfy_entrypoint() -> VoxCPMExtension:
