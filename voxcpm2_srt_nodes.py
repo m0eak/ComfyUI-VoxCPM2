@@ -226,7 +226,7 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 io.Boolean.Input("torch_compile", default=False, label_on="Torch Compile", label_off="Standard", tooltip="Enable torch.compile."),
                 io.String.Input("clone_mode", default="controllable", tooltip="Clone mode: controllable, ultimate, or auto. controllable is recommended for SRT batches."),
                 io.Boolean.Input("export_premiere_xml", default=True, label_on="Export XML", label_off="No XML", tooltip="Export Premiere-compatible timeline XML."),
-                io.Int.Input("timeline_fps", default=30, min=1, max=120, step=1, tooltip="Timeline frame rate."),
+                io.Int.Input("timeline_fps", default=30, min=0, max=120, step=1, tooltip="Timeline frame rate."),
             ],
             outputs=[
                 io.String.Output(display_name="Output Directory"),
