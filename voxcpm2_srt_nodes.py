@@ -16,6 +16,7 @@ from .modules.model_info import AVAILABLE_VOXCPM_MODELS
 from .modules.srt_audio_utils import get_audio_duration_seconds, save_numpy_audio
 from .modules.srt_manifest import load_completed_manifest, upsert_manifest_item, write_json, write_manifest, write_progress
 from .modules.srt_parser import build_preview_json, build_preview_text, parse_srt_file, sanitize_job_name, segments_to_payload
+from .modules.srt_timeline import build_premiere_xml
 from .voxcpm2_nodes import (
     MAX_REFERENCE_AUDIO_SECONDS,
     _get_audio_duration_seconds,
@@ -216,6 +217,8 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 io.Int.Input("retry_max_attempts", default=3, min=0, max=10, step=1, tooltip="坏生成自动重试次数。可减少静音、乱码、异常生成；0 表示不重试。Maximum retry attempts for bad generations."),
                 io.Float.Input("retry_threshold", default=6.0, min=2.0, max=20.0, step=0.1, tooltip="坏生成检测阈值。一般保持默认 6.0，不确定不要改。Bad generation detection threshold."),
                 io.Boolean.Input("force_offload", default=False, label_on="Force Offload", label_off="Auto", tooltip="生成后强制释放模型显存。显存紧张时开启；批量生成时关闭通常更快。Force offload model after generation."),
+                io.Boolean.Input("export_premiere_xml", default=True, label_on="Export XML", label_off="No XML", tooltip="导出 Premiere Pro 可导入的 FCP7 XML 时间线；每段 wav 会按 SRT 时间点排列。Export Premiere-compatible timeline XML."),
+                io.Int.Input("timeline_fps", default=30, min=1, max=120, step=1, tooltip="时间线帧率。一般视频用 30；若项目是 24/25/60fps 可改成对应值。Timeline frame rate."),
                 io.Combo.Input("dtype", options=["auto", "bf16", "fp16"], default="auto", tooltip="模型精度。auto 自动选择；显存紧张时可试 fp16。Model dtype."),
                 io.Combo.Input("device", options=devices, default=default_device, tooltip="推理设备。NVIDIA 显卡通常选 cuda。Inference device."),
                 io.Boolean.Input("torch_compile", default=False, label_on="Torch Compile", label_off="Standard", tooltip="启用 torch.compile 优化。首次会很慢且可能占更多显存；建议先关闭，确认稳定后再尝试。Enable torch.compile."),
@@ -224,6 +227,7 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 io.String.Output(display_name="Output Directory / 输出目录"),
                 io.String.Output(display_name="Manifest Path / 清单路径"),
                 io.String.Output(display_name="Progress Path / 进度路径"),
+                io.String.Output(display_name="Timeline XML Path / 时间线 XML 路径"),
                 io.String.Output(display_name="Status / 状态"),
                 io.AnyType.Output(display_name="SRT TTS Results / 配音结果"),
             ],
@@ -234,7 +238,7 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 enable_asr, enable_denoiser, use_consistency_prompt, consistency_prompt,
                 output_dir, job_name, filename_template, resume, overwrite, seed,
                 seed_strategy, cfg_value, inference_timesteps, max_tokens, normalize_text,
-                retry_max_attempts, retry_threshold, force_offload, torch_compile,
+                retry_max_attempts, retry_threshold, force_offload, export_premiere_xml, timeline_fps, torch_compile,
                 reference_audio=None, dtype="auto", **kwargs):
         if not isinstance(segments, dict) or not segments.get("segments"):
             raise ValueError("SRT segments are required. Connect VoxCPM2 SRT Parser output.")
@@ -464,6 +468,18 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 status="finished",
             )
 
+            timeline_xml_path = ""
+            if export_premiere_xml:
+                built_xml = build_premiere_xml(
+                    job_name=job_dir.name,
+                    manifest=manifest,
+                    job_dir=job_dir,
+                    xml_path=job_dir / "premiere_timeline.xml",
+                    fps=int(timeline_fps),
+                )
+                if built_xml is not None:
+                    timeline_xml_path = str(built_xml)
+
             if force_offload:
                 cache_key = f"{model_name}_{device}_opt{patcher.model.optimize}_compile{torch_compile}_dtype{dtype}"
                 patcher.force_unload()
@@ -476,9 +492,10 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 "job_dir": str(job_dir),
                 "manifest_path": str(manifest_path),
                 "progress_path": str(progress_path),
+                "timeline_xml_path": timeline_xml_path,
                 "results": manifest,
             }
-            return io.NodeOutput(str(job_dir), str(manifest_path), str(progress_path), status, result_payload)
+            return io.NodeOutput(str(job_dir), str(manifest_path), str(progress_path), timeline_xml_path, status, result_payload)
         finally:
             if ref_wav_path:
                 try:
