@@ -146,13 +146,13 @@ class VoxCPM2SRTParserNode(io.ComfyNode):
             category=cls.CATEGORY,
             description="【字幕解析】上传/选择或填写 SRT 字幕文件路径，解析字幕时间轴与文本，并输出可读预览、JSON 预览和结构化片段，供 SRT 批量配音节点使用。Parse an SRT file and output structured subtitle segments with preview.",
             inputs=[
-                io.Combo.Input("srt_file", options=["None"] + _available_srt_files(), default="None", upload=io.UploadType.model, tooltip="上传/选择 SRT 字幕文件，优先级高于 srt_path。Upload/select an SRT subtitle file; takes priority over srt_path."),
-                io.String.Input("srt_path", default="", tooltip="SRT 字幕文件的本地完整路径；已选择 srt_file 时可留空。Local path to the SRT file; leave empty when srt_file is selected."),
+                io.String.Input("srt_path", default="", tooltip="SRT 字幕文件的本地完整路径；也兼容旧工作流。Local path to the SRT file; kept first for old workflow compatibility."),
                 io.Combo.Input("encoding", options=["auto", "utf-8-sig", "utf-8", "gbk"], default="auto", tooltip="字幕编码。auto 会依次尝试 utf-8-sig、utf-8、gbk、cp936；中文字幕乱码时可手动选 gbk。Subtitle encoding."),
                 io.Boolean.Input("skip_empty", default=True, tooltip="跳过空字幕片段。Skip subtitle entries with empty text."),
                 io.Boolean.Input("normalize_whitespace", default=True, tooltip="清理多余空格和空行，让字幕文本更适合 TTS。Normalize extra whitespace for TTS."),
                 io.Boolean.Input("strip_tags", default=True, tooltip="移除简单字幕标签，例如 <i>、<font>。Remove simple SRT/HTML tags."),
                 io.Int.Input("preview_limit", default=30, min=0, max=500, tooltip="预览前多少条字幕；只影响预览输出，不影响实际生成。Number of subtitle entries to preview."),
+                io.Combo.Input("srt_file", options=["None"] + _available_srt_files(), default="None", upload=io.UploadType.model, tooltip="上传/选择 input 目录中的 SRT 字幕文件；如果选择了它，会覆盖 srt_path。Upload/select an SRT subtitle file; overrides srt_path when not None."),
             ],
             outputs=[
                 io.AnyType.Output(display_name="SRT Segments / 字幕片段"),
@@ -164,7 +164,7 @@ class VoxCPM2SRTParserNode(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, srt_file, srt_path, encoding, skip_empty, normalize_whitespace, strip_tags, preview_limit):
+    def execute(cls, srt_path, encoding, skip_empty, normalize_whitespace, strip_tags, preview_limit, srt_file="None"):
         resolved_srt_path = _resolve_srt_path(srt_file, srt_path)
         segments = parse_srt_file(
             resolved_srt_path,
