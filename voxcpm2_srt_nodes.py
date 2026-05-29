@@ -141,9 +141,9 @@ class VoxCPM2SRTParserNode(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="VoxCPM2_SRT_Parser",
-            display_name="VoxCPM2 SRT Parser",
+            display_name="VoxCPM2 SRT Parser / 字幕解析",
             category=cls.CATEGORY,
-            description="解析 SRT 字幕并输出结构化片段与预览。Parse an SRT file and output structured subtitle segments with preview.",
+            description="【字幕解析】上传/选择或填写 SRT 字幕文件路径，解析字幕时间轴与文本，并输出可读预览、JSON 预览和结构化片段，供 SRT 批量配音节点使用。Parse an SRT file and output structured subtitle segments with preview.",
             inputs=[
                 io.Combo.Input("srt_file", options=["None"] + _available_srt_files(), default="None", upload=io.UploadType.model, tooltip="上传/选择 SRT 字幕文件，优先级高于 srt_path。Upload/select an SRT subtitle file; takes priority over srt_path."),
                 io.String.Input("srt_path", default="", tooltip="SRT 字幕文件的本地完整路径；已选择 srt_file 时可留空。Local path to the SRT file; leave empty when srt_file is selected."),
@@ -154,11 +154,11 @@ class VoxCPM2SRTParserNode(io.ComfyNode):
                 io.Int.Input("preview_limit", default=30, min=0, max=500, tooltip="预览前多少条字幕；只影响预览输出，不影响实际生成。Number of subtitle entries to preview."),
             ],
             outputs=[
-                io.AnyType.Output(display_name="SRT Segments"),
-                io.String.Output(display_name="Preview Text"),
-                io.String.Output(display_name="Preview JSON"),
-                io.Int.Output(display_name="Segment Count"),
-                io.String.Output(display_name="Resolved SRT Path"),
+                io.AnyType.Output(display_name="SRT Segments / 字幕片段"),
+                io.String.Output(display_name="Preview Text / 字幕预览"),
+                io.String.Output(display_name="Preview JSON / JSON 预览"),
+                io.Int.Output(display_name="Segment Count / 字幕数量"),
+                io.String.Output(display_name="Resolved SRT Path / 实际字幕路径"),
             ],
         )
 
@@ -188,9 +188,9 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
         default_device = devices[0]
         return io.Schema(
             node_id="VoxCPM2_SRT_Batch_TTS",
-            display_name="VoxCPM2 SRT Batch TTS",
+            display_name="VoxCPM2 SRT Batch TTS / 字幕批量配音",
             category=cls.CATEGORY,
-            description="按 SRT 字幕逐段生成独立 WAV。Generate one WAV file per SRT subtitle segment using VoxCPM2.",
+            description="【字幕批量配音】接收 SRT Parser 输出的字幕片段，使用 VoxCPM2 按字幕逐段生成独立 WAV；支持参考音频克隆、prompt_text 终极克隆、ASR、断点续跑、manifest/progress 和自定义输出目录。Generate one WAV file per SRT subtitle segment using VoxCPM2.",
             inputs=[
                 io.AnyType.Input("segments", tooltip="来自 VoxCPM2 SRT Parser 的字幕解析结果。SRT segments from VoxCPM2 SRT Parser."),
                 io.Combo.Input("model_name", options=model_names, default=model_names[0], tooltip="选择 VoxCPM 模型。正式配音推荐 VoxCPM2；测试节点可用 VoxCPM-0.5B。Select the VoxCPM model."),
@@ -221,11 +221,11 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 io.Boolean.Input("torch_compile", default=False, label_on="Torch Compile", label_off="Standard", tooltip="启用 torch.compile 优化。首次会很慢且可能占更多显存；建议先关闭，确认稳定后再尝试。Enable torch.compile."),
             ],
             outputs=[
-                io.String.Output(display_name="Output Directory"),
-                io.String.Output(display_name="Manifest Path"),
-                io.String.Output(display_name="Progress Path"),
-                io.String.Output(display_name="Status"),
-                io.AnyType.Output(display_name="SRT TTS Results"),
+                io.String.Output(display_name="Output Directory / 输出目录"),
+                io.String.Output(display_name="Manifest Path / 清单路径"),
+                io.String.Output(display_name="Progress Path / 进度路径"),
+                io.String.Output(display_name="Status / 状态"),
+                io.AnyType.Output(display_name="SRT TTS Results / 配音结果"),
             ],
         )
 
