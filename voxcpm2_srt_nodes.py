@@ -30,7 +30,7 @@ from .voxcpm2_nodes import (
 )
 
 
-DEFAULT_CONSISTENCY_PROMPT = "Keep a natural and stable narration style."
+DEFAULT_CONSISTENCY_PROMPT = "保持同一个说话人的音色、音量、语速和语气稳定一致，使用自然连贯的旁白风格。"
 
 
 def _available_model_names() -> list[str]:
@@ -104,7 +104,7 @@ def _build_segment_text(text: str, voice_description: str, use_consistency_promp
     if use_consistency_prompt and consistency_prompt and consistency_prompt.strip():
         desc_parts.append(consistency_prompt.strip())
     if desc_parts:
-        return f"({', '.join(desc_parts)}){text.strip()}"
+        return f"({'；'.join(desc_parts)}){text.strip()}"
     return text.strip()
 
 
@@ -185,9 +185,9 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 io.Boolean.Input("resume", default=True, tooltip="Skip already completed segments from manifest.json."),
                 io.Boolean.Input("overwrite", default=False, tooltip="Overwrite existing WAV files instead of skipping them."),
                 io.Int.Input("seed", default=-1, min=-1, max=0xFFFFFFFFFFFFFFFF, tooltip="Base seed. -1 = random."),
-                io.Combo.Input("seed_strategy", options=["increment_by_index", "fixed", "random", "hash_text"], default="increment_by_index", tooltip="How to derive per-segment seeds."),
-                io.Float.Input("cfg_value", default=2.0, min=1.0, max=10.0, step=0.1, tooltip="Classifier-Free Guidance scale."),
-                io.Int.Input("inference_timesteps", default=12, min=1, max=100, step=1, tooltip="Diffusion steps. More steps = better quality but slower."),
+                io.Combo.Input("seed_strategy", options=["fixed", "increment_by_index", "random", "hash_text"], default="fixed", tooltip="How to derive per-segment seeds. Use fixed for more consistent timbre across SRT segments."),
+                io.Float.Input("cfg_value", default=2.2, min=1.0, max=10.0, step=0.1, tooltip="Classifier-Free Guidance scale. Slightly higher values can improve adherence to voice/style descriptions."),
+                io.Int.Input("inference_timesteps", default=15, min=1, max=100, step=1, tooltip="Diffusion steps. More steps can improve quality and stability but are slower."),
                 io.Int.Input("max_tokens", default=4096, min=64, max=8192, tooltip="Maximum generation length in tokens."),
                 io.Boolean.Input("normalize_text", default=True, label_on="Normalize", label_off="Raw", tooltip="Normalize numbers, abbreviations, and punctuation."),
                 io.Int.Input("retry_max_attempts", default=3, min=0, max=10, step=1, tooltip="Auto-retry on bad generation."),
