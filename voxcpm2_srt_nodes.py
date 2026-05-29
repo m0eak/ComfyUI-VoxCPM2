@@ -56,11 +56,15 @@ def _available_srt_files() -> list[str]:
 
 
 def _resolve_srt_path(srt_file: str, srt_path: str) -> str:
-    if srt_file and str(srt_file).strip() and str(srt_file).strip() != "None":
-        return folder_paths.get_annotated_filepath(str(srt_file).strip())
+    optional_file = str(srt_file or "").strip()
+    if optional_file and optional_file != "None" and optional_file.lower().endswith(".srt"):
+        try:
+            return folder_paths.get_annotated_filepath(optional_file)
+        except Exception:
+            return optional_file
     if srt_path and str(srt_path).strip():
         return str(srt_path).strip()
-    raise ValueError("请上传/选择 SRT 文件，或填写 srt_path。Upload/select an SRT file or provide srt_path.")
+    raise ValueError("Please provide an SRT file path.")
 
 
 def _resolve_job_dir(output_dir: str, job_name: str) -> Path:
@@ -142,29 +146,29 @@ class VoxCPM2SRTParserNode(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="VoxCPM2_SRT_Parser",
-            display_name="VoxCPM2 SRT Parser / 字幕解析",
+            display_name="VoxCPM2 SRT Parser",
             category=cls.CATEGORY,
-            description="【字幕解析】上传/选择或填写 SRT 字幕文件路径，解析字幕时间轴与文本，并输出可读预览、JSON 预览和结构化片段，供 SRT 批量配音节点使用。Parse an SRT file and output structured subtitle segments with preview.",
+            description="Parse an SRT file and output structured subtitle segments with preview.",
             inputs=[
-                io.String.Input("srt_path", default="", tooltip="SRT 字幕文件的本地完整路径；也兼容旧工作流。Local path to the SRT file; kept first for old workflow compatibility."),
-                io.Combo.Input("encoding", options=["auto", "utf-8-sig", "utf-8", "gbk"], default="auto", tooltip="字幕编码。auto 会依次尝试 utf-8-sig、utf-8、gbk、cp936；中文字幕乱码时可手动选 gbk。Subtitle encoding."),
-                io.Boolean.Input("skip_empty", default=True, tooltip="跳过空字幕片段。Skip subtitle entries with empty text."),
-                io.Boolean.Input("normalize_whitespace", default=True, tooltip="清理多余空格和空行，让字幕文本更适合 TTS。Normalize extra whitespace for TTS."),
-                io.Boolean.Input("strip_tags", default=True, tooltip="移除简单字幕标签，例如 <i>、<font>。Remove simple SRT/HTML tags."),
-                io.Int.Input("preview_limit", default=30, min=0, max=500, tooltip="预览前多少条字幕；只影响预览输出，不影响实际生成。Number of subtitle entries to preview."),
-                io.Combo.Input("srt_file", options=["None"] + _available_srt_files(), default="None", upload=io.UploadType.model, tooltip="上传/选择 input 目录中的 SRT 字幕文件；如果选择了它，会覆盖 srt_path。Upload/select an SRT subtitle file; overrides srt_path when not None."),
+                io.String.Input("srt_path", default="", tooltip="Local path to the SRT file."),
+                io.Combo.Input("encoding", options=["auto", "utf-8-sig", "utf-8", "gbk"], default="auto", tooltip="Subtitle encoding. Use gbk if Chinese subtitles are garbled."),
+                io.Boolean.Input("skip_empty", default=True, tooltip="Skip subtitle entries with empty text."),
+                io.Boolean.Input("normalize_whitespace", default=True, tooltip="Normalize extra whitespace for TTS."),
+                io.Boolean.Input("strip_tags", default=True, tooltip="Remove simple SRT/HTML tags."),
+                io.Int.Input("preview_limit", default=30, min=0, max=500, tooltip="Number of subtitle entries to preview."),
+                io.String.Input("srt_file", default="", tooltip="Optional uploaded/selected SRT path. Leave empty to use srt_path."),
             ],
             outputs=[
-                io.AnyType.Output(display_name="SRT Segments / 字幕片段"),
-                io.String.Output(display_name="Preview Text / 字幕预览"),
-                io.String.Output(display_name="Preview JSON / JSON 预览"),
-                io.Int.Output(display_name="Segment Count / 字幕数量"),
-                io.String.Output(display_name="Resolved SRT Path / 实际字幕路径"),
+                io.AnyType.Output(display_name="SRT Segments"),
+                io.String.Output(display_name="Preview Text"),
+                io.String.Output(display_name="Preview JSON"),
+                io.Int.Output(display_name="Segment Count"),
+                io.String.Output(display_name="Resolved SRT Path"),
             ],
         )
 
     @classmethod
-    def execute(cls, srt_path, encoding, skip_empty, normalize_whitespace, strip_tags, preview_limit, srt_file="None"):
+    def execute(cls, srt_path, encoding, skip_empty, normalize_whitespace, strip_tags, preview_limit, srt_file=""):
         resolved_srt_path = _resolve_srt_path(srt_file, srt_path)
         segments = parse_srt_file(
             resolved_srt_path,
@@ -189,58 +193,64 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
         default_device = devices[0]
         return io.Schema(
             node_id="VoxCPM2_SRT_Batch_TTS",
-            display_name="VoxCPM2 SRT Batch TTS / 字幕批量配音",
+            display_name="VoxCPM2 SRT Batch TTS",
             category=cls.CATEGORY,
-            description="【字幕批量配音】接收 SRT Parser 输出的字幕片段，使用 VoxCPM2 按字幕逐段生成独立 WAV；支持参考音频克隆、prompt_text 终极克隆、ASR、断点续跑、manifest/progress 和自定义输出目录。Generate one WAV file per SRT subtitle segment using VoxCPM2.",
+            description="Generate one WAV file per SRT subtitle segment using VoxCPM2.",
             inputs=[
-                io.AnyType.Input("segments", tooltip="来自 VoxCPM2 SRT Parser 的字幕解析结果。SRT segments from VoxCPM2 SRT Parser."),
-                io.Combo.Input("model_name", options=model_names, default=model_names[0], tooltip="选择 VoxCPM 模型。正式配音推荐 VoxCPM2；测试节点可用 VoxCPM-0.5B。Select the VoxCPM model."),
-                io.Combo.Input("lora_name", options=_available_loras(), default="None", tooltip="选择 models/loras 中的 LoRA；不使用则选 None。LoRA checkpoint from models/loras."),
-                io.String.Input("voice_description", multiline=True, default="", tooltip="声音/风格描述，会自动加括号拼接到每段字幕前，例如：（自然、清晰、稳定的旁白声音）字幕文本。Voice/style description prepended to each segment."),
-                io.String.Input("prompt_text", multiline=True, default="", tooltip="参考音频的准确文字稿。配合 clone_mode=ultimate/auto 时会启用终极克隆，声音更像但可能带出参考音频残留；SRT 批量生成更推荐 controllable。Reference transcript for Ultimate Cloning."),
-                io.Combo.Input("clone_mode", options=["controllable", "ultimate", "auto"], default="controllable", tooltip="克隆模式。controllable 只参考音频，更适合 SRT 批量生成；ultimate 使用参考音频+文字稿，更像但可能每段开头带出残留音；auto 有文字稿时自动 ultimate。Clone mode."),
-                io.Audio.Input("reference_audio", optional=True, tooltip="参考音频。连接后启用声音克隆；不连接则普通文本转语音。Reference audio for voice cloning."),
-                io.Boolean.Input("enable_asr", default=False, label_on="ASR", label_off="Off", tooltip="自动识别参考音频文字稿。仅在 clone_mode=ultimate/auto 且 prompt_text 为空时用于终极克隆；若 SRT 每段开头有固定残留音，建议关闭。Auto-transcribe reference audio."),
-                io.Boolean.Input("enable_denoiser", default=False, label_on="Denoise", label_off="Off", tooltip="参考音频降噪。参考音频有底噪时可开启，但会增加耗时并可能下载额外模型。Denoise reference audio before cloning."),
-                io.Boolean.Input("use_consistency_prompt", default=True, tooltip="启用分段一致性提示，尽量保持前后字幕片段的音色、语速、音量和语气一致。Use a consistency hint across segments."),
-                io.String.Input("consistency_prompt", multiline=True, default=DEFAULT_CONSISTENCY_PROMPT, tooltip="分段一致性提示。建议短一点，避免过强提示影响生成自然度。Short prompt to keep segment style consistent."),
-                io.String.Input("output_dir", default="", tooltip="基础输出目录。留空时默认输出到 ComfyUI/output/voxcpm2_srt；填写后会在该目录下创建 job_name 子目录。Base output directory."),
-                io.String.Input("job_name", default="", tooltip="任务名，也是输出子文件夹名。留空则使用当前时间戳。Job folder name."),
-                io.String.Input("filename_template", default="{index:04d}.wav", tooltip="每段 wav 文件名模板。默认 {index:04d}.wav 会生成 0001.wav、0002.wav。Filename template for each segment."),
-                io.Boolean.Input("resume", default=True, tooltip="断点续跑。开启后读取 manifest.json，跳过已成功生成且文件存在的片段。Resume completed segments."),
-                io.Boolean.Input("overwrite", default=False, tooltip="覆盖已有 wav。关闭时已有文件会被跳过；开启时会重新生成并覆盖。Overwrite existing WAV files."),
-                io.Int.Input("seed", default=-1, min=-1, max=0xFFFFFFFFFFFFFFFF, tooltip="基础随机种子。-1 表示每次随机；想让分段更稳定请填固定数字并把生成后随机设为 fixed。Base random seed."),
-                io.Combo.Input("seed_strategy", options=["fixed", "increment_by_index", "random", "hash_text"], default="fixed", tooltip="每段随机种子的生成方式。fixed 对 SRT 分段音色一致性更好；increment_by_index 表示 base_seed + 字幕序号。Per-segment seed strategy."),
-                io.Float.Input("cfg_value", default=2.2, min=1.0, max=10.0, step=0.1, tooltip="提示词引导强度。越高越贴合 voice_description，但可能不够自然；默认 2.2。Classifier-Free Guidance scale."),
-                io.Int.Input("inference_timesteps", default=15, min=1, max=100, step=1, tooltip="扩散推理步数。越高质量和稳定性可能越好但更慢；草稿 6-10，正式可用 15-20。Diffusion inference steps."),
-                io.Int.Input("max_tokens", default=4096, min=64, max=8192, tooltip="最大生成长度。字幕较长时可增大；一般保持 4096。Maximum generation length."),
-                io.Boolean.Input("normalize_text", default=True, label_on="Normalize", label_off="Raw", tooltip="文本归一化。建议自然语言开启；输入音标等特殊文本时再关闭。Normalize text for natural language input."),
-                io.Int.Input("retry_max_attempts", default=3, min=0, max=10, step=1, tooltip="坏生成自动重试次数。可减少静音、乱码、异常生成；0 表示不重试。Maximum retry attempts for bad generations."),
-                io.Float.Input("retry_threshold", default=6.0, min=2.0, max=20.0, step=0.1, tooltip="坏生成检测阈值。一般保持默认 6.0，不确定不要改。Bad generation detection threshold."),
-                io.Boolean.Input("force_offload", default=False, label_on="Force Offload", label_off="Auto", tooltip="生成后强制释放模型显存。显存紧张时开启；批量生成时关闭通常更快。Force offload model after generation."),
-                io.Boolean.Input("export_premiere_xml", default=True, label_on="Export XML", label_off="No XML", tooltip="导出 Premiere Pro 可导入的 FCP7 XML 时间线；每段 wav 会按 SRT 时间点排列。Export Premiere-compatible timeline XML."),
-                io.Int.Input("timeline_fps", default=30, min=1, max=120, step=1, tooltip="时间线帧率。一般视频用 30；若项目是 24/25/60fps 可改成对应值。Timeline frame rate."),
-                io.Combo.Input("dtype", options=["auto", "bf16", "fp16"], default="auto", tooltip="模型精度。auto 自动选择；显存紧张时可试 fp16。Model dtype."),
-                io.Combo.Input("device", options=devices, default=default_device, tooltip="推理设备。NVIDIA 显卡通常选 cuda。Inference device."),
-                io.Boolean.Input("torch_compile", default=False, label_on="Torch Compile", label_off="Standard", tooltip="启用 torch.compile 优化。首次会很慢且可能占更多显存；建议先关闭，确认稳定后再尝试。Enable torch.compile."),
+                io.AnyType.Input("segments", tooltip="SRT segments from VoxCPM2 SRT Parser."),
+                io.Combo.Input("model_name", options=model_names, default=model_names[0], tooltip="Select the VoxCPM model to use."),
+                io.Combo.Input("lora_name", options=_available_loras(), default="None", tooltip="LoRA checkpoint from models/loras."),
+                io.String.Input("voice_description", multiline=True, default="", tooltip="Voice/style description prepended to each segment."),
+                io.String.Input("prompt_text", multiline=True, default="", tooltip="Reference transcript for Ultimate Cloning. For SRT batches, controllable clone mode is usually safer."),
+                io.Audio.Input("reference_audio", optional=True, tooltip="Reference audio for voice cloning. Leave unconnected for text-to-speech."),
+                io.Boolean.Input("enable_asr", default=False, label_on="ASR", label_off="Off", tooltip="Auto-transcribe reference audio. Used only with clone_mode ultimate/auto."),
+                io.Boolean.Input("enable_denoiser", default=False, label_on="Denoise", label_off="Off", tooltip="Denoise reference audio before cloning."),
+                io.Boolean.Input("use_consistency_prompt", default=True, tooltip="Use a consistency hint across segments."),
+                io.String.Input("consistency_prompt", multiline=True, default=DEFAULT_CONSISTENCY_PROMPT, tooltip="Short prompt to keep segment style consistent."),
+                io.String.Input("output_dir", default="", tooltip="Base output directory. Empty uses ComfyUI/output/voxcpm2_srt."),
+                io.String.Input("job_name", default="", tooltip="Job folder name. Empty uses timestamp."),
+                io.String.Input("filename_template", default="{index:04d}.wav", tooltip="Filename template for each segment."),
+                io.Boolean.Input("resume", default=True, tooltip="Resume completed segments from manifest.json."),
+                io.Boolean.Input("overwrite", default=False, tooltip="Overwrite existing WAV files."),
+                io.Int.Input("seed", default=-1, min=-1, max=0xFFFFFFFFFFFFFFFF, tooltip="Base random seed. Use a fixed number for more stable SRT batches."),
+                io.Combo.Input("seed_strategy", options=["fixed", "increment_by_index", "random", "hash_text"], default="fixed", tooltip="Per-segment seed strategy. fixed is usually best for SRT timbre consistency."),
+                io.Float.Input("cfg_value", default=2.2, min=1.0, max=10.0, step=0.1, tooltip="Classifier-Free Guidance scale."),
+                io.Int.Input("inference_timesteps", default=15, min=1, max=100, step=1, tooltip="Diffusion inference steps."),
+                io.Int.Input("max_tokens", default=4096, min=64, max=8192, tooltip="Maximum generation length."),
+                io.Boolean.Input("normalize_text", default=True, label_on="Normalize", label_off="Raw", tooltip="Normalize text for natural language input."),
+                io.Int.Input("retry_max_attempts", default=3, min=0, max=10, step=1, tooltip="Maximum retry attempts for bad generations."),
+                io.Float.Input("retry_threshold", default=6.0, min=2.0, max=20.0, step=0.1, tooltip="Bad generation detection threshold."),
+                io.Boolean.Input("force_offload", default=False, label_on="Force Offload", label_off="Auto", tooltip="Force offload model after generation."),
+                io.Combo.Input("dtype", options=["auto", "bf16", "fp16"], default="auto", tooltip="Model dtype."),
+                io.Combo.Input("device", options=devices, default=default_device, tooltip="Inference device."),
+                io.Boolean.Input("torch_compile", default=False, label_on="Torch Compile", label_off="Standard", tooltip="Enable torch.compile."),
+                io.String.Input("clone_mode", default="controllable", tooltip="Clone mode: controllable, ultimate, or auto. controllable is recommended for SRT batches."),
+                io.Boolean.Input("export_premiere_xml", default=True, label_on="Export XML", label_off="No XML", tooltip="Export Premiere-compatible timeline XML."),
+                io.Int.Input("timeline_fps", default=30, min=1, max=120, step=1, tooltip="Timeline frame rate."),
             ],
             outputs=[
-                io.String.Output(display_name="Output Directory / 输出目录"),
-                io.String.Output(display_name="Manifest Path / 清单路径"),
-                io.String.Output(display_name="Progress Path / 进度路径"),
-                io.String.Output(display_name="Timeline XML Path / 时间线 XML 路径"),
-                io.String.Output(display_name="Status / 状态"),
-                io.AnyType.Output(display_name="SRT TTS Results / 配音结果"),
+                io.String.Output(display_name="Output Directory"),
+                io.String.Output(display_name="Manifest Path"),
+                io.String.Output(display_name="Progress Path"),
+                io.String.Output(display_name="Timeline XML Path"),
+                io.String.Output(display_name="Status"),
+                io.AnyType.Output(display_name="SRT TTS Results"),
             ],
         )
 
     @classmethod
-    def execute(cls, model_name, lora_name, device, segments, voice_description, prompt_text, clone_mode,
+    def execute(cls, model_name, lora_name, device, segments, voice_description, prompt_text,
                 enable_asr, enable_denoiser, use_consistency_prompt, consistency_prompt,
                 output_dir, job_name, filename_template, resume, overwrite, seed,
                 seed_strategy, cfg_value, inference_timesteps, max_tokens, normalize_text,
-                retry_max_attempts, retry_threshold, force_offload, export_premiere_xml, timeline_fps, torch_compile,
-                reference_audio=None, dtype="auto", **kwargs):
+                retry_max_attempts, retry_threshold, force_offload, dtype, device_input, torch_compile,
+                clone_mode="controllable", export_premiere_xml=True, timeline_fps=30,
+                reference_audio=None, **kwargs):
+        device = device_input
+        clone_mode = str(clone_mode or "controllable").strip()
+        if clone_mode not in ("controllable", "ultimate", "auto"):
+            clone_mode = "controllable"
+
         if not isinstance(segments, dict) or not segments.get("segments"):
             raise ValueError("SRT segments are required. Connect VoxCPM2 SRT Parser output.")
 
