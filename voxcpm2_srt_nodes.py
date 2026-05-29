@@ -197,9 +197,10 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 io.Combo.Input("model_name", options=model_names, default=model_names[0], tooltip="选择 VoxCPM 模型。正式配音推荐 VoxCPM2；测试节点可用 VoxCPM-0.5B。Select the VoxCPM model."),
                 io.Combo.Input("lora_name", options=_available_loras(), default="None", tooltip="选择 models/loras 中的 LoRA；不使用则选 None。LoRA checkpoint from models/loras."),
                 io.String.Input("voice_description", multiline=True, default="", tooltip="声音/风格描述，会自动加括号拼接到每段字幕前，例如：（自然、清晰、稳定的旁白声音）字幕文本。Voice/style description prepended to each segment."),
-                io.String.Input("prompt_text", multiline=True, default="", tooltip="参考音频的文字稿。填写后使用终极克隆模式，声音复刻更稳定；不填则使用可控克隆。Transcript of reference audio for Ultimate Cloning."),
+                io.String.Input("prompt_text", multiline=True, default="", tooltip="参考音频的准确文字稿。配合 clone_mode=ultimate/auto 时会启用终极克隆，声音更像但可能带出参考音频残留；SRT 批量生成更推荐 controllable。Reference transcript for Ultimate Cloning."),
+                io.Combo.Input("clone_mode", options=["controllable", "ultimate", "auto"], default="controllable", tooltip="克隆模式。controllable 只参考音频，更适合 SRT 批量生成；ultimate 使用参考音频+文字稿，更像但可能每段开头带出残留音；auto 有文字稿时自动 ultimate。Clone mode."),
                 io.Audio.Input("reference_audio", optional=True, tooltip="参考音频。连接后启用声音克隆；不连接则普通文本转语音。Reference audio for voice cloning."),
-                io.Boolean.Input("enable_asr", default=False, label_on="ASR", label_off="Off", tooltip="自动识别参考音频文字稿。prompt_text 为空时启用，可进入终极克隆模式；首次会下载 SenseVoiceSmall。Auto-transcribe reference audio."),
+                io.Boolean.Input("enable_asr", default=False, label_on="ASR", label_off="Off", tooltip="自动识别参考音频文字稿。仅在 clone_mode=ultimate/auto 且 prompt_text 为空时用于终极克隆；若 SRT 每段开头有固定残留音，建议关闭。Auto-transcribe reference audio."),
                 io.Boolean.Input("enable_denoiser", default=False, label_on="Denoise", label_off="Off", tooltip="参考音频降噪。参考音频有底噪时可开启，但会增加耗时并可能下载额外模型。Denoise reference audio before cloning."),
                 io.Boolean.Input("use_consistency_prompt", default=True, tooltip="启用分段一致性提示，尽量保持前后字幕片段的音色、语速、音量和语气一致。Use a consistency hint across segments."),
                 io.String.Input("consistency_prompt", multiline=True, default=DEFAULT_CONSISTENCY_PROMPT, tooltip="分段一致性提示。建议短一点，避免过强提示影响生成自然度。Short prompt to keep segment style consistent."),
@@ -234,7 +235,7 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, model_name, lora_name, device, segments, voice_description, prompt_text,
+    def execute(cls, model_name, lora_name, device, segments, voice_description, prompt_text, clone_mode,
                 enable_asr, enable_denoiser, use_consistency_prompt, consistency_prompt,
                 output_dir, job_name, filename_template, resume, overwrite, seed,
                 seed_strategy, cfg_value, inference_timesteps, max_tokens, normalize_text,
@@ -254,6 +255,7 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
             "model_name": model_name,
             "lora_name": lora_name,
             "voice_description": voice_description,
+            "clone_mode": clone_mode,
             "use_consistency_prompt": bool(use_consistency_prompt),
             "consistency_prompt": consistency_prompt,
             "cfg_value": float(cfg_value),
@@ -292,7 +294,7 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
             if reference_audio is not None:
                 ref_wav_path = _save_audio_to_temp(reference_audio["waveform"], int(reference_audio["sample_rate"]))
                 _validate_reference_audio_duration(ref_wav_path)
-                if enable_asr and not (prompt_text and prompt_text.strip()):
+                if clone_mode in ("ultimate", "auto") and enable_asr and not (prompt_text and prompt_text.strip()):
                     prompt_text = transcribe_audio(ref_wav_path)
 
             patcher = _load_patcher(model_name, device, torch_compile, dtype)
@@ -357,7 +359,8 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
 
                 try:
                     has_prompt = bool(prompt_text and str(prompt_text).strip())
-                    if ref_wav_path and has_prompt:
+                    use_ultimate_clone = bool(ref_wav_path and has_prompt and clone_mode in ("ultimate", "auto"))
+                    if use_ultimate_clone:
                         wav_array = voxcpm_model.generate(
                             text=final_text,
                             prompt_text=str(prompt_text).strip(),
