@@ -243,10 +243,9 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 enable_asr, enable_denoiser, use_consistency_prompt, consistency_prompt,
                 output_dir, job_name, filename_template, resume, overwrite, seed,
                 seed_strategy, cfg_value, inference_timesteps, max_tokens, normalize_text,
-                retry_max_attempts, retry_threshold, force_offload, dtype, device_input, torch_compile,
+                retry_max_attempts, retry_threshold, force_offload, dtype, torch_compile,
                 clone_mode="controllable", export_premiere_xml=True, timeline_fps=30,
                 reference_audio=None, **kwargs):
-        device = device_input
         clone_mode = str(clone_mode or "controllable").strip()
         if clone_mode not in ("controllable", "ultimate", "auto"):
             clone_mode = "controllable"
