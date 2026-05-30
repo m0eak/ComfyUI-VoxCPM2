@@ -13,7 +13,12 @@ from comfy_api.latest import io
 import comfy.model_management as model_management
 
 from .modules.model_info import AVAILABLE_VOXCPM_MODELS
-from .modules.srt_audio_utils import get_audio_duration_seconds, save_numpy_audio
+from .modules.srt_audio_utils import (
+    get_audio_duration_seconds,
+    numpy_audio_to_waveform,
+    save_waveform_audio,
+    trim_waveform_start,
+)
 from .modules.srt_manifest import load_completed_manifest, upsert_manifest_item, write_json, write_manifest, write_progress
 from .modules.srt_parser import build_preview_json, build_preview_text, parse_srt_file, sanitize_job_name, segments_to_payload
 from .modules.srt_timeline import build_premiere_xml
@@ -227,6 +232,7 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 io.String.Input("clone_mode", default="controllable", tooltip="Clone mode: controllable, ultimate, or auto. controllable is recommended for SRT batches."),
                 io.Boolean.Input("export_premiere_xml", default=True, label_on="Export XML", label_off="No XML", tooltip="Export Premiere-compatible timeline XML."),
                 io.Int.Input("timeline_fps", default=30, min=0, max=120, step=1, tooltip="Timeline frame rate."),
+                io.Int.Input("trim_start_ms", default=0, min=0, max=2000, step=10, tooltip="Trim this many milliseconds from the start of each generated segment. Useful for removing leading artifacts."),
             ],
             outputs=[
                 io.String.Output(display_name="Output Directory"),
@@ -245,7 +251,8 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 seed_strategy, cfg_value, inference_timesteps, max_tokens, normalize_text,
                 retry_max_attempts, retry_threshold, force_offload, dtype, torch_compile,
                 clone_mode="controllable", export_premiere_xml=True, timeline_fps=30,
-                reference_audio=None, **kwargs):
+                trim_start_ms=0, reference_audio=None, **kwargs):
+        trim_start_ms = max(0, min(2000, int(trim_start_ms or 0)))
         clone_mode = str(clone_mode or "controllable").strip()
         if clone_mode not in ("controllable", "ultimate", "auto"):
             clone_mode = "controllable"
@@ -275,6 +282,7 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
             "seed_strategy": seed_strategy,
             "enable_asr": bool(enable_asr),
             "enable_denoiser": bool(enable_denoiser),
+            "trim_start_ms": trim_start_ms,
         }
         write_json(job_dir / "config.json", config)
 
@@ -355,6 +363,8 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                         "cfg_value": float(cfg_value),
                         "inference_timesteps": int(inference_timesteps),
                         "max_tokens": int(max_tokens),
+                        "trim_start_ms": 0,
+                        "trim_start_seconds": 0.0,
                         "status": "ok",
                         "message": "Existing file skipped.",
                     }
@@ -409,7 +419,10 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                         )
                         mode = "tts"
 
-                    save_numpy_audio(wav_array, int(voxcpm_model.tts_model.sample_rate), out_path)
+                    sample_rate = int(voxcpm_model.tts_model.sample_rate)
+                    waveform = numpy_audio_to_waveform(wav_array)
+                    waveform, applied_trim_start_ms = trim_waveform_start(waveform, sample_rate, trim_start_ms)
+                    save_waveform_audio(waveform, sample_rate, out_path)
                     duration = get_audio_duration_seconds(out_path)
                     item = {
                         "subtitle_index": subtitle_index,
@@ -431,6 +444,8 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                         "cfg_value": float(cfg_value),
                         "inference_timesteps": int(inference_timesteps),
                         "max_tokens": int(max_tokens),
+                        "trim_start_ms": applied_trim_start_ms,
+                        "trim_start_seconds": applied_trim_start_ms / 1000.0,
                         "status": "ok",
                         "message": "Done",
                     }
@@ -499,7 +514,7 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 VOXCPM_PATCHER_CACHE.pop(cache_key, None)
                 offload_asr()
 
-            status = f"SRT 批量配音完成 / Finished SRT TTS job: {job_dir} | 成功 / success={success} | 失败 / failed={failed}"
+            status = f"SRT 批量配音完成 / Finished SRT TTS job: {job_dir} | 成功 / success={success} | 失败 / failed={failed} | 头部裁剪 / trim_start_ms={trim_start_ms}"
             result_payload = {
                 "job_dir": str(job_dir),
                 "manifest_path": str(manifest_path),
