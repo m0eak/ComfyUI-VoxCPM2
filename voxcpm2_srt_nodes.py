@@ -17,6 +17,7 @@ from .modules.srt_audio_utils import (
     get_audio_duration_seconds,
     numpy_audio_to_waveform,
     save_waveform_audio,
+    trim_waveform_silence,
     trim_waveform_start,
 )
 from .modules.srt_manifest import load_completed_manifest, upsert_manifest_item, write_json, write_manifest, write_progress
@@ -233,6 +234,11 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 io.Boolean.Input("export_premiere_xml", default=True, label_on="Export XML", label_off="No XML", tooltip="Export Premiere-compatible timeline XML."),
                 io.Int.Input("timeline_fps", default=30, min=0, max=120, step=1, tooltip="Timeline frame rate."),
                 io.Int.Input("trim_start_ms", default=0, min=0, max=2000, step=10, tooltip="Trim this many milliseconds from the start of each generated segment. Useful for removing leading artifacts."),
+                io.Boolean.Input("auto_trim_silence", default=False, label_on="Trim Silence", label_off="Keep Silence", tooltip="Automatically trim leading and trailing silence after fixed start trim."),
+                io.Float.Input("silence_threshold_db", default=-45.0, min=-80.0, max=-20.0, step=1.0, tooltip="Silence threshold in dBFS for auto trimming. Higher values trim more aggressively."),
+                io.Int.Input("silence_min_duration_ms", default=200, min=0, max=2000, step=10, tooltip="Only trim leading/trailing silence at least this long."),
+                io.Int.Input("silence_keep_start_ms", default=80, min=0, max=500, step=10, tooltip="Keep this much padding before detected speech after leading silence trim."),
+                io.Int.Input("silence_keep_end_ms", default=120, min=0, max=1000, step=10, tooltip="Keep this much padding after detected speech before trailing silence trim."),
             ],
             outputs=[
                 io.String.Output(display_name="Output Directory"),
@@ -251,8 +257,15 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 seed_strategy, cfg_value, inference_timesteps, max_tokens, normalize_text,
                 retry_max_attempts, retry_threshold, force_offload, dtype, torch_compile,
                 clone_mode="controllable", export_premiere_xml=True, timeline_fps=30,
-                trim_start_ms=0, reference_audio=None, **kwargs):
+                trim_start_ms=0, auto_trim_silence=False, silence_threshold_db=-45.0,
+                silence_min_duration_ms=200, silence_keep_start_ms=80, silence_keep_end_ms=120,
+                reference_audio=None, **kwargs):
         trim_start_ms = max(0, min(2000, int(trim_start_ms or 0)))
+        auto_trim_silence = bool(auto_trim_silence)
+        silence_threshold_db = max(-80.0, min(-20.0, float(silence_threshold_db)))
+        silence_min_duration_ms = max(0, min(2000, int(silence_min_duration_ms or 0)))
+        silence_keep_start_ms = max(0, min(500, int(silence_keep_start_ms or 0)))
+        silence_keep_end_ms = max(0, min(1000, int(silence_keep_end_ms or 0)))
         clone_mode = str(clone_mode or "controllable").strip()
         if clone_mode not in ("controllable", "ultimate", "auto"):
             clone_mode = "controllable"
@@ -283,6 +296,12 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
             "enable_asr": bool(enable_asr),
             "enable_denoiser": bool(enable_denoiser),
             "trim_start_ms": trim_start_ms,
+            "auto_trim_silence": auto_trim_silence,
+            "silence_threshold_db": silence_threshold_db,
+            "silence_min_duration_ms": silence_min_duration_ms,
+            "silence_keep_start_ms": silence_keep_start_ms,
+            "silence_keep_end_ms": silence_keep_end_ms,
+            "timeline_alignment": "align_to_subtitle_start",
         }
         write_json(job_dir / "config.json", config)
 
@@ -365,6 +384,14 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                         "max_tokens": int(max_tokens),
                         "trim_start_ms": 0,
                         "trim_start_seconds": 0.0,
+                        "auto_trim_silence": auto_trim_silence,
+                        "silence_trim_enabled": False,
+                        "silence_trim_leading_ms": 0,
+                        "silence_trim_trailing_ms": 0,
+                        "total_trimmed_leading_ms": 0,
+                        "total_trimmed_trailing_ms": 0,
+                        "original_audio_duration_seconds": duration,
+                        "timeline_alignment": "align_to_subtitle_start",
                         "status": "ok",
                         "message": "Existing file skipped.",
                     }
@@ -421,7 +448,28 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
 
                     sample_rate = int(voxcpm_model.tts_model.sample_rate)
                     waveform = numpy_audio_to_waveform(wav_array)
+                    original_audio_duration_seconds = float(waveform.shape[-1]) / float(sample_rate)
                     waveform, applied_trim_start_ms = trim_waveform_start(waveform, sample_rate, trim_start_ms)
+                    fixed_trimmed_duration_seconds = float(waveform.shape[-1]) / float(sample_rate)
+                    silence_trim_info = {
+                        "silence_trim_leading_ms": 0,
+                        "silence_trim_trailing_ms": 0,
+                        "silence_trim_threshold_db": silence_threshold_db,
+                        "silence_trim_min_duration_ms": silence_min_duration_ms,
+                        "silence_trim_keep_start_ms": silence_keep_start_ms,
+                        "silence_trim_keep_end_ms": silence_keep_end_ms,
+                        "pre_silence_trim_duration_seconds": fixed_trimmed_duration_seconds,
+                        "post_silence_trim_duration_seconds": fixed_trimmed_duration_seconds,
+                    }
+                    if auto_trim_silence:
+                        waveform, silence_trim_info = trim_waveform_silence(
+                            waveform,
+                            sample_rate,
+                            threshold_db=silence_threshold_db,
+                            min_silence_ms=silence_min_duration_ms,
+                            keep_start_ms=silence_keep_start_ms,
+                            keep_end_ms=silence_keep_end_ms,
+                        )
                     save_waveform_audio(waveform, sample_rate, out_path)
                     duration = get_audio_duration_seconds(out_path)
                     item = {
@@ -446,6 +494,20 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                         "max_tokens": int(max_tokens),
                         "trim_start_ms": applied_trim_start_ms,
                         "trim_start_seconds": applied_trim_start_ms / 1000.0,
+                        "auto_trim_silence": auto_trim_silence,
+                        "silence_trim_enabled": auto_trim_silence,
+                        "silence_trim_leading_ms": int(silence_trim_info["silence_trim_leading_ms"]),
+                        "silence_trim_trailing_ms": int(silence_trim_info["silence_trim_trailing_ms"]),
+                        "silence_trim_threshold_db": float(silence_trim_info["silence_trim_threshold_db"]),
+                        "silence_trim_min_duration_ms": int(silence_trim_info["silence_trim_min_duration_ms"]),
+                        "silence_trim_keep_start_ms": int(silence_trim_info["silence_trim_keep_start_ms"]),
+                        "silence_trim_keep_end_ms": int(silence_trim_info["silence_trim_keep_end_ms"]),
+                        "total_trimmed_leading_ms": applied_trim_start_ms + int(silence_trim_info["silence_trim_leading_ms"]),
+                        "total_trimmed_trailing_ms": int(silence_trim_info["silence_trim_trailing_ms"]),
+                        "original_audio_duration_seconds": original_audio_duration_seconds,
+                        "pre_silence_trim_duration_seconds": float(silence_trim_info["pre_silence_trim_duration_seconds"]),
+                        "post_silence_trim_duration_seconds": float(silence_trim_info["post_silence_trim_duration_seconds"]),
+                        "timeline_alignment": "align_to_subtitle_start",
                         "status": "ok",
                         "message": "Done",
                     }
@@ -514,7 +576,7 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 VOXCPM_PATCHER_CACHE.pop(cache_key, None)
                 offload_asr()
 
-            status = f"SRT 批量配音完成 / Finished SRT TTS job: {job_dir} | 成功 / success={success} | 失败 / failed={failed} | 头部裁剪 / trim_start_ms={trim_start_ms}"
+            status = f"SRT 批量配音完成 / Finished SRT TTS job: {job_dir} | 成功 / success={success} | 失败 / failed={failed} | 头部裁剪 / trim_start_ms={trim_start_ms} | 自动静音裁剪 / auto_trim_silence={auto_trim_silence}"
             result_payload = {
                 "job_dir": str(job_dir),
                 "manifest_path": str(manifest_path),
