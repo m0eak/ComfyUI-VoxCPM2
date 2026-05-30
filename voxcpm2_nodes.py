@@ -14,7 +14,15 @@ from .modules.model_info import AVAILABLE_VOXCPM_MODELS
 from .modules.loader import VoxCPMModelHandler
 from .modules.patcher import VoxCPMPatcher
 
-from .voxcpm2_train_nodes import VoxCPM_TrainConfig, VoxCPM_DatasetMaker, VoxCPM_LoraTrainer
+# LoRA training nodes are intentionally opt-in because importing them pulls in
+# voxcpm.training -> datasets -> pyarrow. On some Windows/ComfyUI setups these
+# native extensions can hard-crash the process during custom node discovery.
+# Set VOXCPM2_ENABLE_TRAINING_NODES=1 to expose training nodes.
+_ENABLE_TRAINING_NODES = os.environ.get("VOXCPM2_ENABLE_TRAINING_NODES", "0").strip().lower() in {"1", "true", "yes", "on"}
+_TRAINING_NODES = []
+if _ENABLE_TRAINING_NODES:
+    from .voxcpm2_train_nodes import VoxCPM_TrainConfig, VoxCPM_DatasetMaker, VoxCPM_LoraTrainer
+    _TRAINING_NODES = [VoxCPM_TrainConfig, VoxCPM_DatasetMaker, VoxCPM_LoraTrainer]
 
 logger = logging.getLogger(__name__)
 
@@ -509,15 +517,17 @@ class VoxCPMExtension(ComfyExtension):
     async def get_node_list(self) -> List[type[io.ComfyNode]]:
         from .voxcpm2_srt_nodes import VoxCPM2SRTBatchTTSNode, VoxCPM2SRTParserNode
 
-        return [
+        nodes = [
             VoxCPM2TTSNode,
             VoxCPM2CloneNode,
-            VoxCPM_TrainConfig,
-            VoxCPM_DatasetMaker,
-            VoxCPM_LoraTrainer,
             VoxCPM2SRTParserNode,
             VoxCPM2SRTBatchTTSNode,
         ]
+        if _TRAINING_NODES:
+            nodes.extend(_TRAINING_NODES)
+        else:
+            logger.info("VoxCPM2 training nodes disabled. Set VOXCPM2_ENABLE_TRAINING_NODES=1 to enable them.")
+        return nodes
 
 async def comfy_entrypoint() -> VoxCPMExtension:
     return VoxCPMExtension()
