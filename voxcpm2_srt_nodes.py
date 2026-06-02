@@ -81,14 +81,23 @@ def _resolve_job_dir(output_dir: str, job_name: str) -> Path:
     return base_dir / sanitize_job_name(job_name)
 
 
+def _sanitize_filename_prefix(name: str) -> str:
+    text = str(name or "").strip()
+    text = "".join("_" if ch.isspace() else ch for ch in text)
+    invalid_chars = '<>:"/\\|?*'
+    text = "".join("_" if ch in invalid_chars or ord(ch) < 32 else ch for ch in text)
+    text = text.strip("._-")
+    return text
+
+
 def _resolve_srt_name(source_path: str) -> str:
     source_stem = Path(str(source_path or "")).stem
-    return sanitize_job_name(source_stem) if source_stem else ""
+    return _sanitize_filename_prefix(source_stem) if source_stem else ""
 
 
 def _format_output_name(template: str, segment: dict[str, Any], used_names: set[str], srt_name: str = "", use_srt_name_prefix: bool = False) -> str:
     raw_template = (template or "{index:04d}.wav").strip() or "{index:04d}.wav"
-    srt_name = sanitize_job_name(str(srt_name or "").strip())
+    srt_name = _sanitize_filename_prefix(str(srt_name or "").strip())
     values = {
         "index": int(segment["index"]),
         "start": str(segment.get("start", "")).replace(":", "-").replace(",", "."),
