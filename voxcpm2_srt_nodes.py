@@ -73,6 +73,15 @@ def _resolve_srt_path(srt_file: str, srt_path: str) -> str:
     raise ValueError("Please provide an SRT file path.")
 
 
+def _resolve_srt_source_name(srt_file: str, srt_path: str, resolved_srt_path: str) -> str:
+    optional_file = str(srt_file or "").strip()
+    if optional_file and optional_file != "None" and optional_file.lower().endswith(".srt"):
+        return Path(optional_file.replace("\\", "/")).name
+    if srt_path and str(srt_path).strip():
+        return Path(str(srt_path).strip()).name
+    return Path(str(resolved_srt_path or "")).name
+
+
 def _resolve_job_dir(output_dir: str, job_name: str) -> Path:
     if output_dir and output_dir.strip():
         base_dir = Path(output_dir.strip())
@@ -90,9 +99,12 @@ def _sanitize_filename_prefix(name: str) -> str:
     return text
 
 
-def _resolve_srt_name(source_path: str) -> str:
-    source_stem = Path(str(source_path or "")).stem
-    return _sanitize_filename_prefix(source_stem) if source_stem else ""
+def _resolve_srt_name(source_path: str, source_name: str = "", srt_name: str = "") -> str:
+    for candidate in (srt_name, Path(str(source_name or "")).stem, Path(str(source_path or "")).stem):
+        cleaned = _sanitize_filename_prefix(candidate)
+        if cleaned:
+            return cleaned
+    return ""
 
 
 def _format_output_name(template: str, segment: dict[str, Any], used_names: set[str], srt_name: str = "", use_srt_name_prefix: bool = False) -> str:
@@ -201,7 +213,8 @@ class VoxCPM2SRTParserNode(io.ComfyNode):
             normalize_whitespace=normalize_whitespace,
             strip_tags=strip_tags,
         )
-        payload = segments_to_payload(segments, resolved_srt_path)
+        source_name = _resolve_srt_source_name(srt_file, srt_path, resolved_srt_path)
+        payload = segments_to_payload(segments, resolved_srt_path, source_name=source_name)
         preview_text = build_preview_text(segments, preview_limit=preview_limit)
         preview_json = build_preview_json(segments, preview_limit=preview_limit)
         return io.NodeOutput(payload, preview_text, preview_json, len(segments), resolved_srt_path)
@@ -294,14 +307,18 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
 
         segment_items: list[dict[str, Any]] = list(segments["segments"])
         source_path = str(segments.get("source_path", "") or "")
+        source_name = str(segments.get("source_name", "") or "")
+        payload_srt_name = str(segments.get("srt_name", "") or "")
         job_dir = _resolve_job_dir(output_dir, job_name)
-        srt_name = _resolve_srt_name(source_path)
+        srt_name = _resolve_srt_name(source_path, source_name, payload_srt_name)
         wav_dir = job_dir / "wav"
         job_dir.mkdir(parents=True, exist_ok=True)
         wav_dir.mkdir(parents=True, exist_ok=True)
 
         config = {
             "source_path": source_path,
+            "source_name": source_name,
+            "srt_name": payload_srt_name,
             "model_name": model_name,
             "lora_name": lora_name,
             "voice_description": voice_description,

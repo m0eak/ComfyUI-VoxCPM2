@@ -118,9 +118,12 @@ def parse_srt_file(
     return segments
 
 
-def segments_to_payload(segments: list[SRTSegment], source_path: str) -> dict[str, Any]:
+def segments_to_payload(segments: list[SRTSegment], source_path: str, source_name: str | None = None) -> dict[str, Any]:
+    source_name = source_name or Path(str(source_path)).name
     return {
         "source_path": str(source_path),
+        "source_name": str(source_name),
+        "srt_name": Path(str(source_name)).stem,
         "count": len(segments),
         "segments": [asdict(segment) for segment in segments],
     }
