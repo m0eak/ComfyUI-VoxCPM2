@@ -515,13 +515,14 @@ class VoxCPM2CloneNode(io.ComfyNode):
 
 class VoxCPMExtension(ComfyExtension):
     async def get_node_list(self) -> List[type[io.ComfyNode]]:
-        from .voxcpm2_srt_nodes import VoxCPM2SRTBatchTTSNode, VoxCPM2SRTParserNode
+        from .voxcpm2_srt_nodes import VoxCPM2SRTBatchTTSNode, VoxCPM2SRTFolderBatchTTSNode, VoxCPM2SRTParserNode
 
         nodes = [
             VoxCPM2TTSNode,
             VoxCPM2CloneNode,
             VoxCPM2SRTParserNode,
             VoxCPM2SRTBatchTTSNode,
+            VoxCPM2SRTFolderBatchTTSNode,
         ]
         if _TRAINING_NODES:
             nodes.extend(_TRAINING_NODES)

@@ -175,6 +175,57 @@ def _success_counts(manifest: list[dict[str, Any]]) -> tuple[int, int]:
     return success, failed
 
 
+
+
+def _build_srt_tts_common_inputs(model_names: list[str], devices: list[str], default_device: str) -> list:
+    return [
+        io.Combo.Input("model_name", options=model_names, default=model_names[0], tooltip="Select the VoxCPM model to use."),
+        io.Combo.Input("lora_name", options=_available_loras(), default="None", tooltip="LoRA checkpoint from models/loras."),
+        io.String.Input("voice_description", multiline=True, default="", tooltip="Voice/style description prepended to each segment."),
+        io.String.Input("prompt_text", multiline=True, default="", tooltip="Reference transcript for Ultimate Cloning."),
+        io.Audio.Input("reference_audio", optional=True, tooltip="Reference audio for voice cloning. Leave unconnected for text-to-speech."),
+        io.Boolean.Input("enable_asr", default=True, label_on="ASR", label_off="Off", tooltip="Auto-transcribe reference audio. Used only with clone_mode ultimate/auto."),
+        io.Boolean.Input("enable_denoiser", default=False, label_on="Denoise", label_off="Off", tooltip="Denoise reference audio before cloning."),
+        io.Boolean.Input("use_consistency_prompt", default=True, tooltip="Use a consistency hint across segments."),
+        io.String.Input("consistency_prompt", multiline=True, default=DEFAULT_CONSISTENCY_PROMPT, tooltip="Short prompt to keep segment style consistent."),
+        io.String.Input("output_dir", default="", tooltip="Base output directory. Empty uses ComfyUI/output/voxcpm2_srt."),
+        io.String.Input("job_name", default="", tooltip="Job folder name. Empty uses timestamp. Folder batch ignores this and uses each SRT filename."),
+        io.String.Input("filename_template", default="{index:04d}.wav", tooltip="Filename template for each segment."),
+        io.Boolean.Input("resume", default=True, tooltip="Resume completed segments from manifest.json."),
+        io.Boolean.Input("overwrite", default=False, tooltip="Overwrite existing WAV files."),
+        io.Int.Input("seed", default=-1, min=-1, max=0xFFFFFFFFFFFFFFFF, tooltip="Base random seed. Use a fixed number for more stable SRT batches."),
+        io.Combo.Input("seed_strategy", options=["fixed", "increment_by_index", "random", "hash_text"], default="fixed", tooltip="Per-segment seed strategy. fixed is usually best for SRT timbre consistency."),
+        io.Float.Input("cfg_value", default=2.0, min=1.0, max=10.0, step=0.1, tooltip="Classifier-Free Guidance scale."),
+        io.Int.Input("inference_timesteps", default=12, min=1, max=100, step=1, tooltip="Diffusion inference steps."),
+        io.Int.Input("max_tokens", default=4096, min=64, max=8192, tooltip="Maximum generation length."),
+        io.Boolean.Input("normalize_text", default=True, label_on="Normalize", label_off="Raw", tooltip="Normalize text for natural language input."),
+        io.Int.Input("retry_max_attempts", default=3, min=0, max=10, step=1, tooltip="Maximum retry attempts for bad generations."),
+        io.Float.Input("retry_threshold", default=6.0, min=2.0, max=20.0, step=0.1, tooltip="Bad generation detection threshold."),
+        io.Boolean.Input("force_offload", default=False, label_on="Force Offload", label_off="Auto", tooltip="Force offload model after generation."),
+        io.Combo.Input("dtype", options=["auto", "bf16", "fp16"], default="auto", tooltip="Model dtype."),
+        io.Combo.Input("device", options=devices, default=default_device, tooltip="Inference device."),
+        io.Boolean.Input("torch_compile", default=False, label_on="Torch Compile", label_off="Standard", tooltip="Enable torch.compile."),
+        io.Combo.Input("clone_mode", options=["auto", "ultimate", "controllable"], default="auto", tooltip="Clone mode. auto uses Ultimate Clone when prompt_text or ASR is available, otherwise falls back to controllable."),
+        io.Boolean.Input("export_premiere_xml", default=True, label_on="Export XML", label_off="No XML", tooltip="Export Premiere-compatible timeline XML."),
+        io.Int.Input("timeline_fps", default=30, min=0, max=120, step=1, tooltip="Timeline frame rate."),
+        io.Int.Input("trim_start_ms", default=100, min=0, max=2000, step=10, tooltip="Trim this many milliseconds from the start of each generated segment."),
+        io.Boolean.Input("auto_trim_silence", default=False, label_on="Trim Silence", label_off="Keep Silence", tooltip="Automatically trim leading and trailing silence after fixed start trim."),
+        io.Float.Input("silence_threshold_db", default=-45.0, min=-80.0, max=-20.0, step=1.0, tooltip="Silence threshold in dBFS for auto trimming."),
+        io.Int.Input("silence_min_duration_ms", default=200, min=0, max=2000, step=10, tooltip="Only trim leading/trailing silence at least this long."),
+        io.Int.Input("silence_keep_start_ms", default=80, min=0, max=500, step=10, tooltip="Keep padding before detected speech."),
+        io.Int.Input("silence_keep_end_ms", default=120, min=0, max=1000, step=10, tooltip="Keep padding after detected speech."),
+        io.Boolean.Input("use_srt_name_prefix", default=True, label_on="SRT Prefix", label_off="No Prefix", tooltip="Prefix generated WAV filenames with the SRT filename."),
+    ]
+
+
+def _scan_srt_files(folder_path: str, recursive: bool) -> list[Path]:
+    folder = Path(str(folder_path or '').strip())
+    if not folder.exists() or not folder.is_dir():
+        raise ValueError(f"SRT folder not found: {folder_path}")
+    pattern = '**/*.srt' if recursive else '*.srt'
+    return sorted([path for path in folder.glob(pattern) if path.is_file()], key=lambda item: str(item).lower())
+
+
 class VoxCPM2SRTParserNode(io.ComfyNode):
     CATEGORY = "audio/tts/srt"
 
@@ -235,42 +286,7 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
             description="Generate one WAV file per SRT subtitle segment using VoxCPM2.",
             inputs=[
                 io.AnyType.Input("segments", tooltip="SRT segments from VoxCPM2 SRT Parser."),
-                io.Combo.Input("model_name", options=model_names, default=model_names[0], tooltip="Select the VoxCPM model to use."),
-                io.Combo.Input("lora_name", options=_available_loras(), default="None", tooltip="LoRA checkpoint from models/loras."),
-                io.String.Input("voice_description", multiline=True, default="", tooltip="Voice/style description prepended to each segment."),
-                io.String.Input("prompt_text", multiline=True, default="", tooltip="Reference transcript for Ultimate Cloning. For SRT batches, controllable clone mode is usually safer."),
-                io.Audio.Input("reference_audio", optional=True, tooltip="Reference audio for voice cloning. Leave unconnected for text-to-speech."),
-                io.Boolean.Input("enable_asr", default=True, label_on="ASR", label_off="Off", tooltip="Auto-transcribe reference audio. Used only with clone_mode ultimate/auto."),
-                io.Boolean.Input("enable_denoiser", default=False, label_on="Denoise", label_off="Off", tooltip="Denoise reference audio before cloning."),
-                io.Boolean.Input("use_consistency_prompt", default=True, tooltip="Use a consistency hint across segments."),
-                io.String.Input("consistency_prompt", multiline=True, default=DEFAULT_CONSISTENCY_PROMPT, tooltip="Short prompt to keep segment style consistent."),
-                io.String.Input("output_dir", default="", tooltip="Base output directory. Empty uses ComfyUI/output/voxcpm2_srt."),
-                io.String.Input("job_name", default="", tooltip="Job folder name. Empty uses timestamp."),
-                io.String.Input("filename_template", default="{index:04d}.wav", tooltip="Filename template for each segment."),
-                io.Boolean.Input("resume", default=True, tooltip="Resume completed segments from manifest.json."),
-                io.Boolean.Input("overwrite", default=False, tooltip="Overwrite existing WAV files."),
-                io.Int.Input("seed", default=-1, min=-1, max=0xFFFFFFFFFFFFFFFF, tooltip="Base random seed. Use a fixed number for more stable SRT batches."),
-                io.Combo.Input("seed_strategy", options=["fixed", "increment_by_index", "random", "hash_text"], default="fixed", tooltip="Per-segment seed strategy. fixed is usually best for SRT timbre consistency."),
-                io.Float.Input("cfg_value", default=2.0, min=1.0, max=10.0, step=0.1, tooltip="Classifier-Free Guidance scale."),
-                io.Int.Input("inference_timesteps", default=12, min=1, max=100, step=1, tooltip="Diffusion inference steps."),
-                io.Int.Input("max_tokens", default=4096, min=64, max=8192, tooltip="Maximum generation length."),
-                io.Boolean.Input("normalize_text", default=True, label_on="Normalize", label_off="Raw", tooltip="Normalize text for natural language input."),
-                io.Int.Input("retry_max_attempts", default=3, min=0, max=10, step=1, tooltip="Maximum retry attempts for bad generations."),
-                io.Float.Input("retry_threshold", default=6.0, min=2.0, max=20.0, step=0.1, tooltip="Bad generation detection threshold."),
-                io.Boolean.Input("force_offload", default=False, label_on="Force Offload", label_off="Auto", tooltip="Force offload model after generation."),
-                io.Combo.Input("dtype", options=["auto", "bf16", "fp16"], default="auto", tooltip="Model dtype."),
-                io.Combo.Input("device", options=devices, default=default_device, tooltip="Inference device."),
-                io.Boolean.Input("torch_compile", default=False, label_on="Torch Compile", label_off="Standard", tooltip="Enable torch.compile."),
-                io.Combo.Input("clone_mode", options=["auto", "ultimate", "controllable"], default="auto", tooltip="Clone mode. auto uses Ultimate Clone when prompt_text or ASR is available, otherwise falls back to controllable."),
-                io.Boolean.Input("export_premiere_xml", default=True, label_on="Export XML", label_off="No XML", tooltip="Export Premiere-compatible timeline XML."),
-                io.Int.Input("timeline_fps", default=30, min=0, max=120, step=1, tooltip="Timeline frame rate."),
-                io.Int.Input("trim_start_ms", default=100, min=0, max=2000, step=10, tooltip="Trim this many milliseconds from the start of each generated segment. Useful for removing leading artifacts."),
-                io.Boolean.Input("auto_trim_silence", default=False, label_on="Trim Silence", label_off="Keep Silence", tooltip="Automatically trim leading and trailing silence after fixed start trim."),
-                io.Float.Input("silence_threshold_db", default=-45.0, min=-80.0, max=-20.0, step=1.0, tooltip="Silence threshold in dBFS for auto trimming. Higher values trim more aggressively."),
-                io.Int.Input("silence_min_duration_ms", default=200, min=0, max=2000, step=10, tooltip="Only trim leading/trailing silence at least this long."),
-                io.Int.Input("silence_keep_start_ms", default=80, min=0, max=500, step=10, tooltip="Keep this much padding before detected speech after leading silence trim."),
-                io.Int.Input("silence_keep_end_ms", default=120, min=0, max=1000, step=10, tooltip="Keep this much padding after detected speech before trailing silence trim."),
-                io.Boolean.Input("use_srt_name_prefix", default=True, label_on="SRT Prefix", label_off="No Prefix", tooltip="Prefix generated WAV filenames with the SRT filename to reduce Premiere relink conflicts."),
+                *_build_srt_tts_common_inputs(model_names, devices, default_device),
             ],
             outputs=[
                 io.String.Output(display_name="Output Directory"),
@@ -633,3 +649,104 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                     os.unlink(ref_wav_path)
                 except OSError:
                     pass
+
+
+class VoxCPM2SRTFolderBatchTTSNode(io.ComfyNode):
+    CATEGORY = "audio/tts/srt"
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        model_names = _available_model_names()
+        devices = get_available_devices()
+        default_device = devices[0]
+        return io.Schema(
+            node_id="VoxCPM2_SRT_Folder_Batch_TTS",
+            display_name="VoxCPM2 SRT Folder Batch TTS",
+            category=cls.CATEGORY,
+            description="Scan a folder for SRT files and generate one independent TTS job per SRT.",
+            inputs=[
+                io.String.Input("srt_folder_path", default="", tooltip="Folder containing .srt files."),
+                io.Boolean.Input("recursive", default=False, label_on="Recursive", label_off="Top Folder", tooltip="Scan subfolders recursively."),
+                *_build_srt_tts_common_inputs(model_names, devices, default_device),
+            ],
+            outputs=[
+                io.String.Output(display_name="Output Root Directory"),
+                io.String.Output(display_name="Batch Summary Path"),
+                io.String.Output(display_name="Status"),
+                io.AnyType.Output(display_name="Folder Batch Results"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, srt_folder_path, recursive, model_name, lora_name, device,
+                voice_description, prompt_text, enable_asr, enable_denoiser,
+                use_consistency_prompt, consistency_prompt, output_dir, job_name,
+                filename_template, resume, overwrite, seed, seed_strategy, cfg_value,
+                inference_timesteps, max_tokens, normalize_text, retry_max_attempts,
+                retry_threshold, force_offload, dtype, torch_compile, clone_mode="auto",
+                export_premiere_xml=True, timeline_fps=30, trim_start_ms=100,
+                auto_trim_silence=False, silence_threshold_db=-45.0,
+                silence_min_duration_ms=200, silence_keep_start_ms=80,
+                silence_keep_end_ms=120, use_srt_name_prefix=True, reference_audio=None,
+                **kwargs):
+        srt_files = _scan_srt_files(srt_folder_path, bool(recursive))
+        if not srt_files:
+            raise ValueError(f"No .srt files found in folder: {srt_folder_path}")
+
+        root_output_dir = Path(output_dir.strip()) if output_dir and str(output_dir).strip() else Path(folder_paths.get_output_directory()) / "voxcpm2_srt"
+        root_output_dir.mkdir(parents=True, exist_ok=True)
+        jobs = []
+        success_jobs = 0
+        failed_jobs = 0
+
+        for srt_path_obj in srt_files:
+            srt_name = _sanitize_filename_prefix(srt_path_obj.stem) or srt_path_obj.stem
+            try:
+                parsed = parse_srt_file(str(srt_path_obj), encoding="auto", skip_empty=True, normalize_whitespace=True, strip_tags=True)
+                payload = segments_to_payload(parsed, str(srt_path_obj), source_name=srt_path_obj.name)
+                VoxCPM2SRTBatchTTSNode.execute(
+                    model_name, lora_name, device, payload, voice_description, prompt_text,
+                    enable_asr, enable_denoiser, use_consistency_prompt, consistency_prompt,
+                    str(root_output_dir), srt_name, filename_template, resume, overwrite, seed,
+                    seed_strategy, cfg_value, inference_timesteps, max_tokens, normalize_text,
+                    retry_max_attempts, retry_threshold, False, dtype, torch_compile,
+                    clone_mode=clone_mode, export_premiere_xml=export_premiere_xml,
+                    timeline_fps=timeline_fps, trim_start_ms=trim_start_ms,
+                    auto_trim_silence=auto_trim_silence,
+                    silence_threshold_db=silence_threshold_db,
+                    silence_min_duration_ms=silence_min_duration_ms,
+                    silence_keep_start_ms=silence_keep_start_ms,
+                    silence_keep_end_ms=silence_keep_end_ms,
+                    use_srt_name_prefix=use_srt_name_prefix,
+                    reference_audio=reference_audio,
+                )
+                job_dir = root_output_dir / srt_name
+                jobs.append({
+                    "srt_path": str(srt_path_obj),
+                    "job_name": srt_name,
+                    "job_dir": str(job_dir),
+                    "manifest_path": str(job_dir / "manifest.json"),
+                    "progress_path": str(job_dir / "progress.json"),
+                    "timeline_xml_path": str(job_dir / "premiere_timeline.xml") if export_premiere_xml else "",
+                    "status": "ok",
+                })
+                success_jobs += 1
+            except Exception as exc:
+                jobs.append({"srt_path": str(srt_path_obj), "job_name": srt_name, "status": "error", "message": str(exc)})
+                failed_jobs += 1
+
+        if force_offload:
+            offload_asr()
+
+        summary = {
+            "status": "finished",
+            "srt_folder_path": str(srt_folder_path),
+            "output_root_dir": str(root_output_dir),
+            "total_srt_files": len(srt_files),
+            "success_jobs": success_jobs,
+            "failed_jobs": failed_jobs,
+            "jobs": jobs,
+        }
+        summary_path = write_json(root_output_dir / "batch_summary.json", summary)
+        status = f"Folder SRT batch finished: total={len(srt_files)} | success={success_jobs} | failed={failed_jobs}"
+        return io.NodeOutput(str(root_output_dir), str(summary_path), status, summary)
