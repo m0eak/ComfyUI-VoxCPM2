@@ -81,17 +81,40 @@ def _resolve_job_dir(output_dir: str, job_name: str) -> Path:
     return base_dir / sanitize_job_name(job_name)
 
 
-def _format_output_name(template: str, segment: dict[str, Any], used_names: set[str]) -> str:
+def _resolve_filename_prefix(custom_filename_prefix: str, use_srt_name_prefix: bool, source_path: str, fallback_name: str) -> tuple[str, str]:
+    custom_prefix = sanitize_job_name(str(custom_filename_prefix or "").strip())
+    if custom_prefix:
+        return custom_prefix, "custom"
+
+    if bool(use_srt_name_prefix):
+        source_stem = Path(str(source_path or "")).stem
+        source_prefix = sanitize_job_name(source_stem) if source_stem else ""
+        if source_prefix:
+            return source_prefix, "srt_name"
+
+    fallback_prefix = sanitize_job_name(str(fallback_name or "").strip())
+    if fallback_prefix:
+        return fallback_prefix, "job_name"
+    return "voxcpm2_srt", "fallback"
+
+
+def _format_output_name(template: str, segment: dict[str, Any], used_names: set[str], filename_prefix: str = "") -> str:
     raw_template = (template or "{index:04d}.wav").strip() or "{index:04d}.wav"
+    filename_prefix = sanitize_job_name(str(filename_prefix or "").strip())
     values = {
         "index": int(segment["index"]),
         "start": str(segment.get("start", "")).replace(":", "-").replace(",", "."),
         "end": str(segment.get("end", "")).replace(":", "-").replace(",", "."),
+        "prefix": filename_prefix,
+        "srt_name": filename_prefix,
     }
     try:
         candidate = raw_template.format(**values)
     except Exception:
         candidate = f"{values['index']:04d}.wav"
+
+    if filename_prefix and "{prefix" not in raw_template and "{srt_name" not in raw_template:
+        candidate = f"{filename_prefix}_{candidate}"
 
     if not candidate.lower().endswith(".wav"):
         candidate += ".wav"
@@ -239,6 +262,8 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 io.Int.Input("silence_min_duration_ms", default=200, min=0, max=2000, step=10, tooltip="Only trim leading/trailing silence at least this long."),
                 io.Int.Input("silence_keep_start_ms", default=80, min=0, max=500, step=10, tooltip="Keep this much padding before detected speech after leading silence trim."),
                 io.Int.Input("silence_keep_end_ms", default=120, min=0, max=1000, step=10, tooltip="Keep this much padding after detected speech before trailing silence trim."),
+                io.Boolean.Input("use_srt_name_prefix", default=True, label_on="SRT Prefix", label_off="No Prefix", tooltip="Prefix generated WAV filenames with the SRT filename to reduce Premiere relink conflicts."),
+                io.String.Input("custom_filename_prefix", default="", tooltip="Optional custom WAV filename prefix. Overrides the SRT filename prefix when set."),
             ],
             outputs=[
                 io.String.Output(display_name="Output Directory"),
@@ -259,7 +284,7 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 clone_mode="controllable", export_premiere_xml=True, timeline_fps=30,
                 trim_start_ms=0, auto_trim_silence=False, silence_threshold_db=-45.0,
                 silence_min_duration_ms=200, silence_keep_start_ms=80, silence_keep_end_ms=120,
-                reference_audio=None, **kwargs):
+                use_srt_name_prefix=True, custom_filename_prefix="", reference_audio=None, **kwargs):
         trim_start_ms = max(0, min(2000, int(trim_start_ms or 0)))
         auto_trim_silence = bool(auto_trim_silence)
         silence_threshold_db = max(-80.0, min(-20.0, float(silence_threshold_db)))
@@ -274,13 +299,20 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
             raise ValueError("SRT segments are required. Connect VoxCPM2 SRT Parser output.")
 
         segment_items: list[dict[str, Any]] = list(segments["segments"])
+        source_path = str(segments.get("source_path", "") or "")
         job_dir = _resolve_job_dir(output_dir, job_name)
+        filename_prefix, filename_prefix_source = _resolve_filename_prefix(
+            custom_filename_prefix,
+            bool(use_srt_name_prefix),
+            source_path,
+            job_dir.name,
+        )
         wav_dir = job_dir / "wav"
         job_dir.mkdir(parents=True, exist_ok=True)
         wav_dir.mkdir(parents=True, exist_ok=True)
 
         config = {
-            "source_path": segments.get("source_path", ""),
+            "source_path": source_path,
             "model_name": model_name,
             "lora_name": lora_name,
             "voice_description": voice_description,
@@ -302,6 +334,10 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
             "silence_keep_start_ms": silence_keep_start_ms,
             "silence_keep_end_ms": silence_keep_end_ms,
             "timeline_alignment": "align_to_subtitle_start",
+            "use_srt_name_prefix": bool(use_srt_name_prefix),
+            "custom_filename_prefix": custom_filename_prefix,
+            "filename_prefix": filename_prefix,
+            "filename_prefix_source": filename_prefix_source,
         }
         write_json(job_dir / "config.json", config)
 
@@ -356,7 +392,7 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                     results.append(completed[subtitle_index])
                     continue
 
-                out_name = _format_output_name(filename_template, segment, used_names)
+                out_name = _format_output_name(filename_template, segment, used_names, filename_prefix)
                 relative_output = f"wav/{out_name}"
                 out_path = wav_dir / out_name
 
@@ -392,6 +428,8 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                         "total_trimmed_trailing_ms": 0,
                         "original_audio_duration_seconds": duration,
                         "timeline_alignment": "align_to_subtitle_start",
+                        "filename_prefix": filename_prefix,
+                        "filename_prefix_source": filename_prefix_source,
                         "status": "ok",
                         "message": "Existing file skipped.",
                     }
@@ -508,6 +546,8 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                         "pre_silence_trim_duration_seconds": float(silence_trim_info["pre_silence_trim_duration_seconds"]),
                         "post_silence_trim_duration_seconds": float(silence_trim_info["post_silence_trim_duration_seconds"]),
                         "timeline_alignment": "align_to_subtitle_start",
+                        "filename_prefix": filename_prefix,
+                        "filename_prefix_source": filename_prefix_source,
                         "status": "ok",
                         "message": "Done",
                     }

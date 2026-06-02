@@ -12,6 +12,7 @@ class TimelineClip:
     subtitle_index: int
     file_name: str
     file_path: str
+    xml_pathurl: str
     start_seconds: float
     end_seconds: float
     audio_duration_seconds: float
@@ -58,6 +59,10 @@ def _assign_timeline_track_groups(clips: list[TimelineClip]) -> int:
     return len(track_end_times)
 
 
+def _relative_file_pathurl(path: Path) -> str:
+    return "file://localhost/" + path.as_posix()
+
+
 def _manifest_to_clips(manifest: list[dict], job_dir: Path) -> list[TimelineClip]:
     clips: list[TimelineClip] = []
     for item in manifest:
@@ -82,6 +87,7 @@ def _manifest_to_clips(manifest: list[dict], job_dir: Path) -> list[TimelineClip
                 subtitle_index=int(item.get("subtitle_index", len(clips) + 1)),
                 file_name=Path(output_file).name,
                 file_path=str(file_path),
+                xml_pathurl=_relative_file_pathurl(Path(output_file)),
                 start_seconds=start_seconds,
                 end_seconds=end_seconds,
                 audio_duration_seconds=audio_duration_seconds,
@@ -121,7 +127,7 @@ def build_premiere_xml(job_name: str, manifest: list[dict], job_dir: Path, xml_p
             end_frame = start_frame + duration_frames
             frames, file_sample_rate, file_channels = _get_audio_file_info(clip.file_path)
             file_duration_frames = max(1, _seconds_to_frames(frames / file_sample_rate, timeline_fps))
-            pathurl = Path(clip.file_path).resolve().as_uri()
+            pathurl = clip.xml_pathurl
             clip_id = clip_item_counter
             clip_item_counter += 1
             file_id = f"file-{file_counter}"
