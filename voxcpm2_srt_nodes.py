@@ -663,7 +663,7 @@ class VoxCPM2SRTSingleLineTTSNode(io.ComfyNode):
             node_id="VoxCPM2_SRT_Single_Line_TTS",
             display_name="VoxCPM2 SRT Single Line TTS",
             category=cls.CATEGORY,
-            description="Generate one manual replacement line using the same SRT TTS parameters.",
+            description="Generate one manual replacement line directly to a WAV file.",
             inputs=[
                 io.String.Input("text", multiline=True, default="", tooltip="Manual text for one replacement subtitle line."),
                 *_build_srt_tts_common_inputs(model_names, devices, default_device),
@@ -690,53 +690,164 @@ class VoxCPM2SRTSingleLineTTSNode(io.ComfyNode):
         if not clean_text:
             raise ValueError("Text is required for single line TTS.")
 
-        segment = {
-            "source_path": "manual_input",
-            "source_name": "manual_input.srt",
-            "srt_name": "manual_input",
-            "count": 1,
-            "segments": [{
-                "index": 1,
-                "start": "00:00:00,000",
-                "end": "00:00:10,000",
-                "start_seconds": 0.0,
-                "end_seconds": 10.0,
-                "text": clean_text,
-            }],
-        }
-        single_output_dir = output_dir
-        if not single_output_dir or not str(single_output_dir).strip():
-            single_output_dir = str(Path(folder_paths.get_output_directory()) / "voxcpm2_single_line")
-        single_job_name = job_name if job_name and str(job_name).strip() else time.strftime("manual_%Y%m%d_%H%M%S")
-        single_filename_template = filename_template if filename_template and str(filename_template).strip() else "single_line_{index:04d}.wav"
+        trim_start_ms = max(0, min(2000, int(trim_start_ms or 0)))
+        auto_trim_silence = bool(auto_trim_silence)
+        silence_threshold_db = max(-80.0, min(-20.0, float(silence_threshold_db)))
+        silence_min_duration_ms = max(0, min(2000, int(silence_min_duration_ms or 0)))
+        silence_keep_start_ms = max(0, min(500, int(silence_keep_start_ms or 0)))
+        silence_keep_end_ms = max(0, min(1000, int(silence_keep_end_ms or 0)))
+        clone_mode = str(clone_mode or "controllable").strip()
+        if clone_mode not in ("controllable", "ultimate", "auto"):
+            clone_mode = "controllable"
 
-        result = VoxCPM2SRTBatchTTSNode.execute(
-            model_name, lora_name, device, segment, voice_description, prompt_text,
-            enable_asr, enable_denoiser, use_consistency_prompt, consistency_prompt,
-            single_output_dir, single_job_name, single_filename_template, False, True, seed,
-            seed_strategy, cfg_value, inference_timesteps, max_tokens, normalize_text,
-            retry_max_attempts, retry_threshold, force_offload, dtype, torch_compile,
-            clone_mode=clone_mode,
-            export_premiere_xml=False,
-            timeline_fps=timeline_fps,
-            trim_start_ms=trim_start_ms,
-            auto_trim_silence=auto_trim_silence,
-            silence_threshold_db=silence_threshold_db,
-            silence_min_duration_ms=silence_min_duration_ms,
-            silence_keep_start_ms=silence_keep_start_ms,
-            silence_keep_end_ms=silence_keep_end_ms,
-            use_srt_name_prefix=False,
-            reference_audio=reference_audio,
-        )
-        batch_payload = result[5]
-        items = batch_payload.get("results", []) if isinstance(batch_payload, dict) else []
-        item = items[0] if items else {}
-        job_dir = Path(str(batch_payload.get("job_dir", single_output_dir))) if isinstance(batch_payload, dict) else Path(single_output_dir)
-        output_file = str(item.get("output_file", ""))
-        wav_path = str(job_dir / output_file) if output_file else ""
-        duration = float(item.get("audio_duration_seconds", 0.0) or 0.0)
-        status = f"Single line TTS finished: {wav_path} | duration={duration:.2f}s | mode={item.get('mode', '')}"
-        return io.NodeOutput(wav_path, duration, status, item)
+        output_base = Path(str(output_dir).strip()) if output_dir and str(output_dir).strip() else Path(folder_paths.get_output_directory())
+        output_base.mkdir(parents=True, exist_ok=True)
+        output_stem = _sanitize_filename_prefix(str(job_name or "").strip())
+        if not output_stem:
+            output_stem = time.strftime("single_line_%Y%m%d_%H%M%S")
+        if output_stem.lower().endswith(".wav"):
+            output_name = output_stem
+        else:
+            output_name = f"{output_stem}.wav"
+        out_path = output_base / output_name
+        if out_path.exists() and not overwrite:
+            output_stem = out_path.stem
+            output_name = f"{output_stem}_{time.strftime('%Y%m%d_%H%M%S')}.wav"
+            out_path = output_base / output_name
+
+        segment = {"index": 1, "text": clean_text}
+        actual_seed = _resolve_seed(int(seed), seed_strategy, segment)
+        final_text = _build_segment_text(clean_text, voice_description, bool(use_consistency_prompt), consistency_prompt)
+
+        ref_wav_path = None
+        try:
+            if reference_audio is not None:
+                ref_wav_path = _save_audio_to_temp(reference_audio["waveform"], int(reference_audio["sample_rate"]))
+                _validate_reference_audio_duration(ref_wav_path)
+                if clone_mode in ("ultimate", "auto") and enable_asr and not (prompt_text and str(prompt_text).strip()):
+                    prompt_text = transcribe_audio(ref_wav_path)
+
+            patcher = _load_patcher(model_name, device, torch_compile, dtype)
+            model_management.load_model_gpu(patcher)
+            voxcpm_model = patcher.model.model
+            if not voxcpm_model:
+                raise RuntimeError(f"Failed to load model '{model_name}'.")
+
+            if lora_name != "None":
+                lora_path = folder_paths.get_full_path("loras", lora_name)
+                if not lora_path:
+                    raise FileNotFoundError(f"LoRA file not found: {lora_name}")
+                voxcpm_model.load_lora(lora_path)
+                voxcpm_model.set_lora_enabled(True)
+            else:
+                voxcpm_model.set_lora_enabled(False)
+
+            set_seed(actual_seed)
+            has_prompt = bool(prompt_text and str(prompt_text).strip())
+            use_ultimate_clone = bool(ref_wav_path and has_prompt and clone_mode in ("ultimate", "auto"))
+            if use_ultimate_clone:
+                wav_array = voxcpm_model.generate(
+                    text=final_text,
+                    prompt_text=str(prompt_text).strip(),
+                    prompt_wav_path=ref_wav_path,
+                    reference_wav_path=ref_wav_path,
+                    cfg_value=float(cfg_value),
+                    inference_timesteps=int(inference_timesteps),
+                    max_len=int(max_tokens),
+                    normalize=bool(normalize_text),
+                    denoise=bool(enable_denoiser),
+                    retry_badcase=int(retry_max_attempts) > 0,
+                    retry_badcase_max_times=int(retry_max_attempts),
+                    retry_badcase_ratio_threshold=float(retry_threshold),
+                )
+                mode = "ultimate_clone"
+            elif ref_wav_path:
+                wav_array = voxcpm_model.generate(
+                    text=final_text,
+                    reference_wav_path=ref_wav_path,
+                    cfg_value=float(cfg_value),
+                    inference_timesteps=int(inference_timesteps),
+                    max_len=int(max_tokens),
+                    normalize=bool(normalize_text),
+                    denoise=bool(enable_denoiser),
+                    retry_badcase=int(retry_max_attempts) > 0,
+                    retry_badcase_max_times=int(retry_max_attempts),
+                    retry_badcase_ratio_threshold=float(retry_threshold),
+                )
+                mode = "voice_clone"
+            else:
+                wav_array = voxcpm_model.generate(
+                    text=final_text,
+                    cfg_value=float(cfg_value),
+                    inference_timesteps=int(inference_timesteps),
+                    max_len=int(max_tokens),
+                    normalize=bool(normalize_text),
+                )
+                mode = "tts"
+
+            sample_rate = int(voxcpm_model.tts_model.sample_rate)
+            waveform = numpy_audio_to_waveform(wav_array)
+            original_audio_duration_seconds = float(waveform.shape[-1]) / float(sample_rate)
+            waveform, applied_trim_start_ms = trim_waveform_start(waveform, sample_rate, trim_start_ms)
+            fixed_trimmed_duration_seconds = float(waveform.shape[-1]) / float(sample_rate)
+            silence_trim_info = {
+                "silence_trim_leading_ms": 0,
+                "silence_trim_trailing_ms": 0,
+                "silence_trim_threshold_db": silence_threshold_db,
+                "silence_trim_min_duration_ms": silence_min_duration_ms,
+                "silence_trim_keep_start_ms": silence_keep_start_ms,
+                "silence_trim_keep_end_ms": silence_keep_end_ms,
+                "pre_silence_trim_duration_seconds": fixed_trimmed_duration_seconds,
+                "post_silence_trim_duration_seconds": fixed_trimmed_duration_seconds,
+            }
+            if auto_trim_silence:
+                waveform, silence_trim_info = trim_waveform_silence(
+                    waveform,
+                    sample_rate,
+                    threshold_db=silence_threshold_db,
+                    min_silence_ms=silence_min_duration_ms,
+                    keep_start_ms=silence_keep_start_ms,
+                    keep_end_ms=silence_keep_end_ms,
+                )
+            save_waveform_audio(waveform, sample_rate, out_path)
+            duration = get_audio_duration_seconds(out_path)
+
+            if force_offload:
+                cache_key = f"{model_name}_{device}_opt{patcher.model.optimize}_compile{torch_compile}_dtype{dtype}"
+                patcher.force_unload()
+                from .voxcpm2_nodes import VOXCPM_PATCHER_CACHE
+                VOXCPM_PATCHER_CACHE.pop(cache_key, None)
+                offload_asr()
+
+            item = {
+                "text": clean_text,
+                "final_text": final_text,
+                "output_file": str(out_path),
+                "audio_duration_seconds": duration,
+                "model_name": model_name,
+                "lora_name": lora_name,
+                "mode": mode,
+                "seed": actual_seed,
+                "cfg_value": float(cfg_value),
+                "inference_timesteps": int(inference_timesteps),
+                "max_tokens": int(max_tokens),
+                "trim_start_ms": applied_trim_start_ms,
+                "trim_start_seconds": applied_trim_start_ms / 1000.0,
+                "auto_trim_silence": auto_trim_silence,
+                "silence_trim_leading_ms": int(silence_trim_info["silence_trim_leading_ms"]),
+                "silence_trim_trailing_ms": int(silence_trim_info["silence_trim_trailing_ms"]),
+                "original_audio_duration_seconds": original_audio_duration_seconds,
+                "status": "ok",
+                "message": "Done",
+            }
+            status = f"Single line TTS finished: {out_path} | duration={duration:.2f}s | mode={mode}"
+            return io.NodeOutput(str(out_path), float(duration), status, item)
+        finally:
+            if ref_wav_path:
+                try:
+                    os.unlink(ref_wav_path)
+                except OSError:
+                    pass
 
 
 class VoxCPM2SRTFolderBatchTTSNode(io.ComfyNode):
