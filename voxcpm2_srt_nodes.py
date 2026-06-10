@@ -651,6 +651,94 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                     pass
 
 
+class VoxCPM2SRTSingleLineTTSNode(io.ComfyNode):
+    CATEGORY = "audio/tts/srt"
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        model_names = _available_model_names()
+        devices = get_available_devices()
+        default_device = devices[0]
+        return io.Schema(
+            node_id="VoxCPM2_SRT_Single_Line_TTS",
+            display_name="VoxCPM2 SRT Single Line TTS",
+            category=cls.CATEGORY,
+            description="Generate one manual replacement line using the same SRT TTS parameters.",
+            inputs=[
+                io.String.Input("text", multiline=True, default="", tooltip="Manual text for one replacement subtitle line."),
+                *_build_srt_tts_common_inputs(model_names, devices, default_device),
+            ],
+            outputs=[
+                io.String.Output(display_name="WAV Path"),
+                io.Float.Output(display_name="Duration Seconds"),
+                io.String.Output(display_name="Status"),
+                io.AnyType.Output(display_name="Single Line Result"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, text, model_name, lora_name, device, voice_description, prompt_text,
+                enable_asr, enable_denoiser, use_consistency_prompt, consistency_prompt,
+                output_dir, job_name, filename_template, resume, overwrite, seed,
+                seed_strategy, cfg_value, inference_timesteps, max_tokens, normalize_text,
+                retry_max_attempts, retry_threshold, force_offload, dtype, torch_compile,
+                clone_mode="auto", export_premiere_xml=True, timeline_fps=30,
+                trim_start_ms=100, auto_trim_silence=False, silence_threshold_db=-45.0,
+                silence_min_duration_ms=200, silence_keep_start_ms=80, silence_keep_end_ms=120,
+                use_srt_name_prefix=True, reference_audio=None, **kwargs):
+        clean_text = str(text or "").strip()
+        if not clean_text:
+            raise ValueError("Text is required for single line TTS.")
+
+        segment = {
+            "source_path": "manual_input",
+            "source_name": "manual_input.srt",
+            "srt_name": "manual_input",
+            "count": 1,
+            "segments": [{
+                "index": 1,
+                "start": "00:00:00,000",
+                "end": "00:00:10,000",
+                "start_seconds": 0.0,
+                "end_seconds": 10.0,
+                "text": clean_text,
+            }],
+        }
+        single_output_dir = output_dir
+        if not single_output_dir or not str(single_output_dir).strip():
+            single_output_dir = str(Path(folder_paths.get_output_directory()) / "voxcpm2_single_line")
+        single_job_name = job_name if job_name and str(job_name).strip() else time.strftime("manual_%Y%m%d_%H%M%S")
+        single_filename_template = filename_template if filename_template and str(filename_template).strip() else "single_line_{index:04d}.wav"
+
+        result = VoxCPM2SRTBatchTTSNode.execute(
+            model_name, lora_name, device, segment, voice_description, prompt_text,
+            enable_asr, enable_denoiser, use_consistency_prompt, consistency_prompt,
+            single_output_dir, single_job_name, single_filename_template, False, True, seed,
+            seed_strategy, cfg_value, inference_timesteps, max_tokens, normalize_text,
+            retry_max_attempts, retry_threshold, force_offload, dtype, torch_compile,
+            clone_mode=clone_mode,
+            export_premiere_xml=False,
+            timeline_fps=timeline_fps,
+            trim_start_ms=trim_start_ms,
+            auto_trim_silence=auto_trim_silence,
+            silence_threshold_db=silence_threshold_db,
+            silence_min_duration_ms=silence_min_duration_ms,
+            silence_keep_start_ms=silence_keep_start_ms,
+            silence_keep_end_ms=silence_keep_end_ms,
+            use_srt_name_prefix=False,
+            reference_audio=reference_audio,
+        )
+        batch_payload = result[5]
+        items = batch_payload.get("results", []) if isinstance(batch_payload, dict) else []
+        item = items[0] if items else {}
+        job_dir = Path(str(batch_payload.get("job_dir", single_output_dir))) if isinstance(batch_payload, dict) else Path(single_output_dir)
+        output_file = str(item.get("output_file", ""))
+        wav_path = str(job_dir / output_file) if output_file else ""
+        duration = float(item.get("audio_duration_seconds", 0.0) or 0.0)
+        status = f"Single line TTS finished: {wav_path} | duration={duration:.2f}s | mode={item.get('mode', '')}"
+        return io.NodeOutput(wav_path, duration, status, item)
+
+
 class VoxCPM2SRTFolderBatchTTSNode(io.ComfyNode):
     CATEGORY = "audio/tts/srt"
 
