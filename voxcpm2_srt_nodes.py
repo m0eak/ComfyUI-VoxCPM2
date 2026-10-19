@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 import tempfile
@@ -20,11 +19,16 @@ from .modules.srt_audio_utils import (
     trim_waveform_silence,
     trim_waveform_start,
 )
+from .modules.srt_generation import (
+    _build_segment_text,
+    generate_segment_audio,
+    prepare_reference_audio,
+    _resolve_seed,
+)
 from .modules.srt_manifest import load_completed_manifest, upsert_manifest_item, write_json, write_manifest, write_progress
 from .modules.srt_parser import build_preview_json, build_preview_text, parse_srt_file, sanitize_job_name, segments_to_payload
 from .modules.srt_timeline import build_premiere_xml
 from .voxcpm2_nodes import (
-    MAX_REFERENCE_AUDIO_SECONDS,
     _get_audio_duration_seconds,
     _load_patcher,
     _normalize_loudness,
@@ -139,34 +143,6 @@ def _format_output_name(template: str, segment: dict[str, Any], used_names: set[
             used_names.add(deduped)
             return deduped
         suffix += 1
-
-
-def _resolve_seed(base_seed: int, strategy: str, segment: dict[str, Any]) -> int:
-    if int(base_seed) < 0:
-        import random
-        return random.randint(0, 2**31 - 1)
-
-    strategy = strategy or "increment_by_index"
-    if strategy == "fixed":
-        return int(base_seed)
-    if strategy == "random":
-        import random
-        return random.randint(0, 2**31 - 1)
-    if strategy == "hash_text":
-        digest = hashlib.sha256(str(segment.get("text", "")).encode("utf-8")).hexdigest()
-        return (int(base_seed) + int(digest[:8], 16)) & 0xFFFFFFFF
-    return int(base_seed) + int(segment["index"])
-
-
-def _build_segment_text(text: str, voice_description: str, use_consistency_prompt: bool, consistency_prompt: str) -> str:
-    desc_parts: list[str] = []
-    if voice_description and voice_description.strip():
-        desc_parts.append(voice_description.strip())
-    if use_consistency_prompt and consistency_prompt and consistency_prompt.strip():
-        desc_parts.append(consistency_prompt.strip())
-    if desc_parts:
-        return f"({'；'.join(desc_parts)}){text.strip()}"
-    return text.strip()
 
 
 def _success_counts(manifest: list[dict[str, Any]]) -> tuple[int, int]:
@@ -383,11 +359,15 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
 
         ref_wav_path = None
         try:
-            if reference_audio is not None:
-                ref_wav_path = _save_audio_to_temp(reference_audio["waveform"], int(reference_audio["sample_rate"]))
-                _validate_reference_audio_duration(ref_wav_path)
-                if clone_mode in ("ultimate", "auto") and enable_asr and not (prompt_text and prompt_text.strip()):
-                    prompt_text = transcribe_audio(ref_wav_path)
+            ref_wav_path, prompt_text = prepare_reference_audio(
+                reference_audio,
+                clone_mode,
+                enable_asr,
+                prompt_text,
+                save_audio_to_temp=_save_audio_to_temp,
+                validate_reference_audio_duration=_validate_reference_audio_duration,
+                transcribe_audio=transcribe_audio,
+            )
 
             patcher = _load_patcher(model_name, device, torch_compile, dtype)
             model_management.load_model_gpu(patcher)
@@ -461,47 +441,20 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 final_text = _build_segment_text(str(segment["text"]), voice_description, bool(use_consistency_prompt), consistency_prompt)
 
                 try:
-                    has_prompt = bool(prompt_text and str(prompt_text).strip())
-                    use_ultimate_clone = bool(ref_wav_path and has_prompt and clone_mode in ("ultimate", "auto"))
-                    if use_ultimate_clone:
-                        wav_array = voxcpm_model.generate(
-                            text=final_text,
-                            prompt_text=str(prompt_text).strip(),
-                            prompt_wav_path=ref_wav_path,
-                            reference_wav_path=ref_wav_path,
-                            cfg_value=float(cfg_value),
-                            inference_timesteps=int(inference_timesteps),
-                            max_len=int(max_tokens),
-                            normalize=bool(normalize_text),
-                            denoise=bool(enable_denoiser),
-                            retry_badcase=int(retry_max_attempts) > 0,
-                            retry_badcase_max_times=int(retry_max_attempts),
-                            retry_badcase_ratio_threshold=float(retry_threshold),
-                        )
-                        mode = "ultimate_clone"
-                    elif ref_wav_path:
-                        wav_array = voxcpm_model.generate(
-                            text=final_text,
-                            reference_wav_path=ref_wav_path,
-                            cfg_value=float(cfg_value),
-                            inference_timesteps=int(inference_timesteps),
-                            max_len=int(max_tokens),
-                            normalize=bool(normalize_text),
-                            denoise=bool(enable_denoiser),
-                            retry_badcase=int(retry_max_attempts) > 0,
-                            retry_badcase_max_times=int(retry_max_attempts),
-                            retry_badcase_ratio_threshold=float(retry_threshold),
-                        )
-                        mode = "voice_clone"
-                    else:
-                        wav_array = voxcpm_model.generate(
-                            text=final_text,
-                            cfg_value=float(cfg_value),
-                            inference_timesteps=int(inference_timesteps),
-                            max_len=int(max_tokens),
-                            normalize=bool(normalize_text),
-                        )
-                        mode = "tts"
+                    wav_array, mode = generate_segment_audio(
+                        voxcpm_model,
+                        text=final_text,
+                        reference_audio_path=ref_wav_path,
+                        prompt_text=prompt_text,
+                        clone_mode=clone_mode,
+                        cfg_value=cfg_value,
+                        inference_timesteps=inference_timesteps,
+                        max_tokens=max_tokens,
+                        normalize_text=normalize_text,
+                        enable_denoiser=enable_denoiser,
+                        retry_max_attempts=retry_max_attempts,
+                        retry_threshold=retry_threshold,
+                    )
 
                     sample_rate = int(voxcpm_model.tts_model.sample_rate)
                     waveform = numpy_audio_to_waveform(wav_array)
@@ -721,11 +674,15 @@ class VoxCPM2SRTSingleLineTTSNode(io.ComfyNode):
 
         ref_wav_path = None
         try:
-            if reference_audio is not None:
-                ref_wav_path = _save_audio_to_temp(reference_audio["waveform"], int(reference_audio["sample_rate"]))
-                _validate_reference_audio_duration(ref_wav_path)
-                if clone_mode in ("ultimate", "auto") and enable_asr and not (prompt_text and str(prompt_text).strip()):
-                    prompt_text = transcribe_audio(ref_wav_path)
+            ref_wav_path, prompt_text = prepare_reference_audio(
+                reference_audio,
+                clone_mode,
+                enable_asr,
+                prompt_text,
+                save_audio_to_temp=_save_audio_to_temp,
+                validate_reference_audio_duration=_validate_reference_audio_duration,
+                transcribe_audio=transcribe_audio,
+            )
 
             patcher = _load_patcher(model_name, device, torch_compile, dtype)
             model_management.load_model_gpu(patcher)
@@ -743,47 +700,20 @@ class VoxCPM2SRTSingleLineTTSNode(io.ComfyNode):
                 voxcpm_model.set_lora_enabled(False)
 
             set_seed(actual_seed)
-            has_prompt = bool(prompt_text and str(prompt_text).strip())
-            use_ultimate_clone = bool(ref_wav_path and has_prompt and clone_mode in ("ultimate", "auto"))
-            if use_ultimate_clone:
-                wav_array = voxcpm_model.generate(
-                    text=final_text,
-                    prompt_text=str(prompt_text).strip(),
-                    prompt_wav_path=ref_wav_path,
-                    reference_wav_path=ref_wav_path,
-                    cfg_value=float(cfg_value),
-                    inference_timesteps=int(inference_timesteps),
-                    max_len=int(max_tokens),
-                    normalize=bool(normalize_text),
-                    denoise=bool(enable_denoiser),
-                    retry_badcase=int(retry_max_attempts) > 0,
-                    retry_badcase_max_times=int(retry_max_attempts),
-                    retry_badcase_ratio_threshold=float(retry_threshold),
-                )
-                mode = "ultimate_clone"
-            elif ref_wav_path:
-                wav_array = voxcpm_model.generate(
-                    text=final_text,
-                    reference_wav_path=ref_wav_path,
-                    cfg_value=float(cfg_value),
-                    inference_timesteps=int(inference_timesteps),
-                    max_len=int(max_tokens),
-                    normalize=bool(normalize_text),
-                    denoise=bool(enable_denoiser),
-                    retry_badcase=int(retry_max_attempts) > 0,
-                    retry_badcase_max_times=int(retry_max_attempts),
-                    retry_badcase_ratio_threshold=float(retry_threshold),
-                )
-                mode = "voice_clone"
-            else:
-                wav_array = voxcpm_model.generate(
-                    text=final_text,
-                    cfg_value=float(cfg_value),
-                    inference_timesteps=int(inference_timesteps),
-                    max_len=int(max_tokens),
-                    normalize=bool(normalize_text),
-                )
-                mode = "tts"
+            wav_array, mode = generate_segment_audio(
+                voxcpm_model,
+                text=final_text,
+                reference_audio_path=ref_wav_path,
+                prompt_text=prompt_text,
+                clone_mode=clone_mode,
+                cfg_value=cfg_value,
+                inference_timesteps=inference_timesteps,
+                max_tokens=max_tokens,
+                normalize_text=normalize_text,
+                enable_denoiser=enable_denoiser,
+                retry_max_attempts=retry_max_attempts,
+                retry_threshold=retry_threshold,
+            )
 
             sample_rate = int(voxcpm_model.tts_model.sample_rate)
             waveform = numpy_audio_to_waveform(wav_array)
