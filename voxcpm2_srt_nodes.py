@@ -155,42 +155,42 @@ def _success_counts(manifest: list[dict[str, Any]]) -> tuple[int, int]:
 
 def _build_srt_tts_common_inputs(model_names: list[str], devices: list[str], default_device: str) -> list:
     return [
-        io.Combo.Input("model_name", options=model_names, default=model_names[0], tooltip="Select the VoxCPM model to use."),
-        io.Combo.Input("lora_name", options=_available_loras(), default="None", tooltip="LoRA checkpoint from models/loras."),
-        io.String.Input("voice_description", multiline=True, default="", tooltip="Voice/style description prepended to each segment."),
-        io.String.Input("prompt_text", multiline=True, default="", tooltip="Reference transcript for Ultimate Cloning."),
-        io.Audio.Input("reference_audio", optional=True, tooltip="Reference audio for voice cloning. Leave unconnected for text-to-speech."),
-        io.Boolean.Input("enable_asr", default=True, label_on="ASR", label_off="Off", tooltip="Auto-transcribe reference audio. Used only with clone_mode ultimate/auto."),
-        io.Boolean.Input("enable_denoiser", default=False, label_on="Denoise", label_off="Off", tooltip="Denoise reference audio before cloning."),
-        io.Boolean.Input("use_consistency_prompt", default=True, tooltip="Use a consistency hint across segments."),
-        io.String.Input("consistency_prompt", multiline=True, default=DEFAULT_CONSISTENCY_PROMPT, tooltip="Short prompt to keep segment style consistent."),
-        io.String.Input("output_dir", default="", tooltip="Base output directory. Empty uses ComfyUI/output/voxcpm2_srt."),
-        io.String.Input("job_name", default="", tooltip="Job folder name. Empty uses timestamp. Folder batch ignores this and uses each SRT filename."),
-        io.String.Input("filename_template", default="{index:04d}.wav", tooltip="Filename template for each segment."),
-        io.Boolean.Input("resume", default=True, tooltip="Resume completed segments from manifest.json."),
-        io.Boolean.Input("overwrite", default=False, tooltip="Overwrite existing WAV files."),
-        io.Int.Input("seed", default=-1, min=-1, max=0xFFFFFFFFFFFFFFFF, tooltip="Base random seed. Use a fixed number for more stable SRT batches."),
-        io.Combo.Input("seed_strategy", options=["fixed", "increment_by_index", "random", "hash_text"], default="fixed", tooltip="Per-segment seed strategy. fixed is usually best for SRT timbre consistency."),
-        io.Float.Input("cfg_value", default=2.0, min=1.0, max=10.0, step=0.1, tooltip="Classifier-Free Guidance scale."),
-        io.Int.Input("inference_timesteps", default=12, min=1, max=100, step=1, tooltip="Diffusion inference steps."),
-        io.Int.Input("max_tokens", default=4096, min=64, max=8192, tooltip="Maximum generation length."),
-        io.Boolean.Input("normalize_text", default=True, label_on="Normalize", label_off="Raw", tooltip="Normalize text for natural language input."),
-        io.Int.Input("retry_max_attempts", default=3, min=0, max=10, step=1, tooltip="Maximum retry attempts for bad generations."),
-        io.Float.Input("retry_threshold", default=6.0, min=2.0, max=20.0, step=0.1, tooltip="Bad generation detection threshold."),
-        io.Boolean.Input("force_offload", default=False, label_on="Force Offload", label_off="Auto", tooltip="Force offload model after generation."),
-        io.Combo.Input("dtype", options=["auto", "bf16", "fp16"], default="auto", tooltip="Model dtype."),
-        io.Combo.Input("device", options=devices, default=default_device, tooltip="Inference device."),
-        io.Boolean.Input("torch_compile", default=False, label_on="Torch Compile", label_off="Standard", tooltip="Enable torch.compile."),
-        io.Combo.Input("clone_mode", options=["auto", "ultimate", "controllable"], default="auto", tooltip="Clone mode. auto uses Ultimate Clone when prompt_text or ASR is available, otherwise falls back to controllable."),
-        io.Boolean.Input("export_premiere_xml", default=True, label_on="Export XML", label_off="No XML", tooltip="Export Premiere-compatible timeline XML."),
-        io.Int.Input("timeline_fps", default=30, min=0, max=120, step=1, tooltip="Timeline frame rate."),
-        io.Int.Input("trim_start_ms", default=100, min=0, max=2000, step=10, tooltip="Trim this many milliseconds from the start of each generated segment."),
-        io.Boolean.Input("auto_trim_silence", default=False, label_on="Trim Silence", label_off="Keep Silence", tooltip="Automatically trim leading and trailing silence after fixed start trim."),
-        io.Float.Input("silence_threshold_db", default=-45.0, min=-80.0, max=-20.0, step=1.0, tooltip="Silence threshold in dBFS for auto trimming."),
-        io.Int.Input("silence_min_duration_ms", default=200, min=0, max=2000, step=10, tooltip="Only trim leading/trailing silence at least this long."),
-        io.Int.Input("silence_keep_start_ms", default=80, min=0, max=500, step=10, tooltip="Keep padding before detected speech."),
-        io.Int.Input("silence_keep_end_ms", default=120, min=0, max=1000, step=10, tooltip="Keep padding after detected speech."),
-        io.Boolean.Input("use_srt_name_prefix", default=True, label_on="SRT Prefix", label_off="No Prefix", tooltip="Prefix generated WAV filenames with the SRT filename."),
+        io.Combo.Input("model_name", options=model_names, default=model_names[0], tooltip="选择要使用的 VoxCPM 模型。批量配音建议统一用一个模型，避免整批音色不一致。"),
+        io.Combo.Input("lora_name", options=_available_loras(), default="None", tooltip="从 models/loras 加载 LoRA 微调权重。保持 None 表示不启用。"),
+        io.String.Input("voice_description", multiline=True, default="", tooltip="语气/风格描述（可选），会加到每一段正文前面。例如“沉稳的男声，语速偏慢”。走极致克隆时该项会被忽略。"),
+        io.String.Input("prompt_text", multiline=True, default="", tooltip="参考音频对应的台词文本（要逐字对得上）。填写后进入极致克隆，相似度最高；留空则走可控克隆。"),
+        io.Audio.Input("reference_audio", optional=True, tooltip="参考音频：用于模仿音色的样本，整批只放一段，建议 5~15 秒干净人声。不接则退化为普通文本转语音。末尾留 0.5~1 秒静音可减少每段开头的杂音。"),
+        io.Boolean.Input("enable_asr", default=True, label_on="自动转写", label_off="关闭", tooltip="自动把参考音频转写成台词。仅在克隆模式为 ultimate/auto 且台词为空时生效；手填了台词就不再自动转写。"),
+        io.Boolean.Input("enable_denoiser", default=False, label_on="降噪", label_off="关闭", tooltip="克隆前先对参考音频做降噪，适合有底噪的录音。需要 modelscope 依赖。"),
+        io.Boolean.Input("use_consistency_prompt", default=True, tooltip="开启后会给每段追加一句“稳定提示词”，让整批的语气和音色更统一。长批量建议保持开启。"),
+        io.String.Input("consistency_prompt", multiline=True, default=DEFAULT_CONSISTENCY_PROMPT, tooltip="稳定提示词：追加到每段正文后面的说明，用来约束整批的语气、语速和音量保持一致。不改正文内容。"),
+        io.String.Input("output_dir", default="", tooltip="输出根目录。留空则用 ComfyUI/output/voxcpm2_srt。"),
+        io.String.Input("job_name", default="", tooltip="任务文件夹名。留空则用时间戳命名。目录批量模式下该项无效，会自动用每个 SRT 的文件名。"),
+        io.String.Input("filename_template", default="{index:04d}.wav", tooltip="每段音频的文件名模板。{index} 是字幕序号，默认生成 0001.wav、0002.wav。"),
+        io.Boolean.Input("resume", default=True, tooltip="继续任务：从已有的 manifest.json 读取进度，跳过已经生成成功的段落，只补做剩下的部分。"),
+        io.Boolean.Input("overwrite", default=False, tooltip="覆盖已有音频。关闭时若同名 WAV 已存在会直接复用、不重新生成；开启则强制重新生成并覆盖。"),
+        io.Int.Input("seed", default=-1, min=-1, max=0xFFFFFFFFFFFFFFFF, tooltip="基础随机种子。填固定数值整批结果可复现、音色更稳定；填 -1 表示每次随机。"),
+        io.Combo.Input("seed_strategy", options=["fixed", "increment_by_index", "random", "hash_text"], default="fixed", tooltip="随机种子策略：fixed 每段用同一个种子（音色最稳，推荐）；increment_by_index 按序号递增；random 每段全随机；hash_text 按该段文字哈希取样。"),
+        io.Float.Input("cfg_value", default=2.0, min=1.0, max=10.0, step=0.1, tooltip="引导强度（CFG）。数值越大越贴合提示描述、越稳定；越小变化越自然但更容易跑偏。批量配音建议 1.8~2.2。"),
+        io.Int.Input("inference_timesteps", default=12, min=1, max=100, step=1, tooltip="推理步数。步数越多音质越好但整批耗时翻倍；12~16 步通常是性价比区间。"),
+        io.Int.Input("max_tokens", default=4096, min=64, max=8192, tooltip="最大生成长度（token），限制单段能生成多长的音频。某段频繁被截断时调大它。"),
+        io.Boolean.Input("normalize_text", default=True, label_on="规范化", label_off="原文", tooltip="自动处理数字、缩写和标点，让读法更自然。字幕里有特殊读法需求时可切到“原文”。"),
+        io.Int.Input("retry_max_attempts", default=3, min=0, max=10, step=1, tooltip="异常重试次数。某段生成出乱语、空白等坏结果时自动重来几次，填 0 表示不重试。"),
+        io.Float.Input("retry_threshold", default=6.0, min=2.0, max=20.0, step=0.1, tooltip="坏结果判定阈值。按“音频时长与文本长度之比”判断是否算失败，明显过短或过长就会触发重试。"),
+        io.Boolean.Input("force_offload", default=False, label_on="强制卸载", label_off="自动", tooltip="整批生成结束后把模型从显存和内存中完全卸载。批量任务通常生成完就结束，可以开启。"),
+        io.Combo.Input("dtype", options=["auto", "bf16", "fp16"], default="auto", tooltip="模型精度。auto 会自动选最合适的一种（新显卡用 bf16，老显卡回退 fp16）。"),
+        io.Combo.Input("device", options=devices, default=default_device, tooltip="推理使用的设备，一般选 CUDA 显卡；显存不足时可换 CPU（会很慢）。"),
+        io.Boolean.Input("torch_compile", default=False, label_on="编译加速", label_off="标准", tooltip="开启 torch.compile 加速。第一次运行需要编译、会比较慢，之后的运行会明显更快。"),
+        io.Combo.Input("clone_mode", options=["auto", "ultimate", "controllable"], default="auto", tooltip="克隆模式：auto 有台词或自动转写结果时走极致克隆，否则退回可控克隆；ultimate 音色最接近参考，但每段开头/结尾更容易出现“耶”声、啁啾等伪影；controllable 只靠参考音频，更适合长时间稳定批量。"),
+        io.Boolean.Input("export_premiere_xml", default=True, label_on="导出 XML", label_off="不导出", tooltip="导出 Premiere 可导入的时间线 XML，按字幕时间点把音频排好，省去手动对轨。"),
+        io.Int.Input("timeline_fps", default=30, min=0, max=120, step=1, tooltip="时间线的帧率，要和你 Premiere 序列的帧率一致（常见 25/30），否则导入后可能对不齐。"),
+        io.Int.Input("trim_start_ms", default=100, min=0, max=2000, step=10, tooltip="开头裁剪：每段固定裁掉开头这么多毫秒，用来消除起始的杂音、啁啾或“耶”声。伪影较重时可加到 150~300。"),
+        io.Boolean.Input("auto_trim_silence", default=False, label_on="裁剪静音", label_off="保留静音", tooltip="自动静音裁剪：在固定开头裁剪之后，再自动检测并裁掉首尾多余静音，让每段更贴合字幕时长。"),
+        io.Float.Input("silence_threshold_db", default=-45.0, min=-80.0, max=-20.0, step=1.0, tooltip="静音阈值（dBFS）。低于这个响度就当作静音。数值越接近 0 判定越严格，裁剪越多。"),
+        io.Int.Input("silence_min_duration_ms", default=200, min=0, max=2000, step=10, tooltip="最短静音时长。只有连续静音超过这么多毫秒才会被裁掉，太短的气口会保留。"),
+        io.Int.Input("silence_keep_start_ms", default=80, min=0, max=500, step=10, tooltip="保留开头静音：裁剪后仍然在声音前留这么多毫秒，避免第一个字被削掉。"),
+        io.Int.Input("silence_keep_end_ms", default=120, min=0, max=1000, step=10, tooltip="保留结尾静音：裁剪后仍然在尾音后留这么多毫秒，避免听感太突兀。"),
+        io.Boolean.Input("use_srt_name_prefix", default=True, label_on="SRT 前缀", label_off="无前缀", tooltip="用 SRT 文件名作为 WAV 前缀（如 教程01_0001.wav）。多个任务素材混在一个工程里时开启，可避免 Premiere 串素材。"),
     ]
 
 
@@ -209,24 +209,24 @@ class VoxCPM2SRTParserNode(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="VoxCPM2_SRT_Parser",
-            display_name="VoxCPM2 SRT Parser",
+            display_name="VoxCPM2 SRT 解析器",
             category=cls.CATEGORY,
-            description="Parse an SRT file and output structured subtitle segments with preview.",
+            description="读取 SRT 字幕文件，拆分成带时间轴的字幕段落，并输出可预览的文本与 JSON。",
             inputs=[
-                io.String.Input("srt_path", default="", tooltip="Local path to the SRT file."),
-                io.Combo.Input("encoding", options=["auto", "utf-8-sig", "utf-8", "gbk"], default="auto", tooltip="Subtitle encoding. Use gbk if Chinese subtitles are garbled."),
-                io.Boolean.Input("skip_empty", default=True, tooltip="Skip subtitle entries with empty text."),
-                io.Boolean.Input("normalize_whitespace", default=True, tooltip="Normalize extra whitespace for TTS."),
-                io.Boolean.Input("strip_tags", default=True, tooltip="Remove simple SRT/HTML tags."),
-                io.Int.Input("preview_limit", default=30, min=0, max=500, tooltip="Number of subtitle entries to preview."),
-                io.String.Input("srt_file", default="", tooltip="Optional uploaded/selected SRT path. Leave empty to use srt_path."),
+                io.String.Input("srt_path", default="", tooltip="SRT 字幕文件的本地路径。可以手填，也可以直接用下面的上传/选择框。"),
+                io.Combo.Input("encoding", options=["auto", "utf-8-sig", "utf-8", "gbk"], default="auto", tooltip="字幕文件编码。中文出现乱码时，把它切到 gbk 通常就能解决。"),
+                io.Boolean.Input("skip_empty", default=True, tooltip="跳过正文为空白的字幕条目，避免生成无意义的空音频。"),
+                io.Boolean.Input("normalize_whitespace", default=True, tooltip="把多余的空格、换行整理成单空格，让朗读更连贯。"),
+                io.Boolean.Input("strip_tags", default=True, tooltip="去掉字幕里简单的样式标签（如 <i>、<font> 等），只保留纯文字。"),
+                io.Int.Input("preview_limit", default=30, min=0, max=500, tooltip="预览区显示多少条字幕。填 0 表示不显示预览，条目很多时调小可以减轻卡顿。"),
+                io.String.Input("srt_file", default="", tooltip="上传或选择得到的 SRT 路径。填了它就以它为准；留空则使用上面的 srt_path。"),
             ],
             outputs=[
-                io.AnyType.Output(display_name="SRT Segments"),
-                io.String.Output(display_name="Preview Text"),
-                io.String.Output(display_name="Preview JSON"),
-                io.Int.Output(display_name="Segment Count"),
-                io.String.Output(display_name="Resolved SRT Path"),
+                io.AnyType.Output(display_name="SRT 字幕段落"),
+                io.String.Output(display_name="预览文本"),
+                io.String.Output(display_name="预览 JSON"),
+                io.Int.Output(display_name="段落数量"),
+                io.String.Output(display_name="实际 SRT 路径"),
             ],
         )
 
@@ -257,20 +257,20 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
         default_device = devices[0]
         return io.Schema(
             node_id="VoxCPM2_SRT_Batch_TTS",
-            display_name="VoxCPM2 SRT Batch TTS",
+            display_name="VoxCPM2 SRT 批量配音",
             category=cls.CATEGORY,
-            description="Generate one WAV file per SRT subtitle segment using VoxCPM2.",
+            description="按 SRT 字幕逐句生成音频，每一条字幕对应一个 WAV 文件，并输出清单、进度和 Premiere 时间线。",
             inputs=[
-                io.AnyType.Input("segments", tooltip="SRT segments from VoxCPM2 SRT Parser."),
+                io.AnyType.Input("segments", tooltip="来自“VoxCPM2 SRT 解析器”的字幕段落数据，必须连接。"),
                 *_build_srt_tts_common_inputs(model_names, devices, default_device),
             ],
             outputs=[
-                io.String.Output(display_name="Output Directory"),
-                io.String.Output(display_name="Manifest Path"),
-                io.String.Output(display_name="Progress Path"),
-                io.String.Output(display_name="Timeline XML Path"),
-                io.String.Output(display_name="Status"),
-                io.AnyType.Output(display_name="SRT TTS Results"),
+                io.String.Output(display_name="输出目录"),
+                io.String.Output(display_name="清单文件路径"),
+                io.String.Output(display_name="进度文件路径"),
+                io.String.Output(display_name="时间线 XML 路径"),
+                io.String.Output(display_name="状态说明"),
+                io.AnyType.Output(display_name="批量配音结果"),
             ],
         )
 
@@ -587,7 +587,7 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 VOXCPM_PATCHER_CACHE.pop(cache_key, None)
                 offload_asr()
 
-            status = f"SRT 批量配音完成 / Finished SRT TTS job: {job_dir} | 成功 / success={success} | 失败 / failed={failed} | 头部裁剪 / trim_start_ms={trim_start_ms} | 自动静音裁剪 / auto_trim_silence={auto_trim_silence}"
+            status = f"SRT 批量配音完成：任务目录 {job_dir} | 成功 {success} 段 | 失败 {failed} 段 | 开头裁剪 {trim_start_ms} 毫秒 | 自动静音裁剪 {'开启' if auto_trim_silence else '关闭'}"
             result_payload = {
                 "job_dir": str(job_dir),
                 "manifest_path": str(manifest_path),
@@ -614,18 +614,18 @@ class VoxCPM2SRTSingleLineTTSNode(io.ComfyNode):
         default_device = devices[0]
         return io.Schema(
             node_id="VoxCPM2_SRT_Single_Line_TTS",
-            display_name="VoxCPM2 SRT Single Line TTS",
+            display_name="VoxCPM2 SRT 单句配音",
             category=cls.CATEGORY,
-            description="Generate one manual replacement line directly to a WAV file.",
+            description="手动输入一句话，单独生成一个 WAV 文件。用于补录或替换某一句字幕的配音。",
             inputs=[
-                io.String.Input("text", multiline=True, default="", tooltip="Manual text for one replacement subtitle line."),
+                io.String.Input("text", multiline=True, default="", tooltip="要生成的那一句台词。通常是从 SRT 里挑出来需要重录或替换的那一条。"),
                 *_build_srt_tts_common_inputs(model_names, devices, default_device),
             ],
             outputs=[
-                io.String.Output(display_name="WAV Path"),
-                io.Float.Output(display_name="Duration Seconds"),
-                io.String.Output(display_name="Status"),
-                io.AnyType.Output(display_name="Single Line Result"),
+                io.String.Output(display_name="WAV 文件路径"),
+                io.Float.Output(display_name="音频时长（秒）"),
+                io.String.Output(display_name="状态说明"),
+                io.AnyType.Output(display_name="单句配音结果"),
             ],
         )
 
@@ -770,7 +770,7 @@ class VoxCPM2SRTSingleLineTTSNode(io.ComfyNode):
                 "status": "ok",
                 "message": "Done",
             }
-            status = f"Single line TTS finished: {out_path} | duration={duration:.2f}s | mode={mode}"
+            status = f"单句配音完成：{out_path} | 时长 {duration:.2f} 秒 | 模式 {mode}"
             return io.NodeOutput(str(out_path), float(duration), status, item)
         finally:
             if ref_wav_path:
@@ -790,19 +790,19 @@ class VoxCPM2SRTFolderBatchTTSNode(io.ComfyNode):
         default_device = devices[0]
         return io.Schema(
             node_id="VoxCPM2_SRT_Folder_Batch_TTS",
-            display_name="VoxCPM2 SRT Folder Batch TTS",
+            display_name="VoxCPM2 SRT 目录批量配音",
             category=cls.CATEGORY,
-            description="Scan a folder for SRT files and generate one independent TTS job per SRT.",
+            description="扫描一个文件夹里的所有 SRT 字幕，每个 SRT 独立生成一套配音音频、清单和 Premiere 时间线。",
             inputs=[
-                io.String.Input("srt_folder_path", default="", tooltip="Folder containing .srt files."),
-                io.Boolean.Input("recursive", default=False, label_on="Recursive", label_off="Top Folder", tooltip="Scan subfolders recursively."),
+                io.String.Input("srt_folder_path", default="", tooltip="包含 .srt 字幕文件的文件夹路径。"),
+                io.Boolean.Input("recursive", default=False, label_on="含子目录", label_off="仅当前层", tooltip="开启后会连子文件夹一起扫描；关闭则只处理当前这一层。"),
                 *_build_srt_tts_common_inputs(model_names, devices, default_device),
             ],
             outputs=[
-                io.String.Output(display_name="Output Root Directory"),
-                io.String.Output(display_name="Batch Summary Path"),
-                io.String.Output(display_name="Status"),
-                io.AnyType.Output(display_name="Folder Batch Results"),
+                io.String.Output(display_name="输出根目录"),
+                io.String.Output(display_name="汇总文件路径"),
+                io.String.Output(display_name="状态说明"),
+                io.AnyType.Output(display_name="目录批量结果"),
             ],
         )
 
@@ -877,5 +877,5 @@ class VoxCPM2SRTFolderBatchTTSNode(io.ComfyNode):
             "jobs": jobs,
         }
         summary_path = write_json(root_output_dir / "batch_summary.json", summary)
-        status = f"Folder SRT batch finished: total={len(srt_files)} | success={success_jobs} | failed={failed_jobs}"
+        status = f"目录批量配音完成：共 {len(srt_files)} 个字幕 | 成功 {success_jobs} 个 | 失败 {failed_jobs} 个"
         return io.NodeOutput(str(root_output_dir), str(summary_path), status, summary)
