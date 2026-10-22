@@ -10,6 +10,11 @@ import folder_paths
 import comfy.model_management as model_management
 from comfy_api.latest import ComfyExtension, io, ui
 
+from .modules.asr_backend import (
+    ASR_BACKEND_OPTIONS,
+    DEFAULT_ASR_SERVER_URL,
+    ASRTranscriber,
+)
 from .modules.model_info import AVAILABLE_VOXCPM_MODELS
 from .modules.loader import VoxCPMModelHandler
 from .modules.patcher import VoxCPMPatcher
@@ -343,6 +348,8 @@ class VoxCPM2CloneNode(io.ComfyNode):
                 io.Int.Input("retry_max_attempts", default=3, min=0, max=10, step=1, tooltip="异常重试次数。生成出乱语、空白等坏结果时自动重来几次，填 0 表示不重试。"),
                 io.Float.Input("retry_threshold", default=6.0, min=2.0, max=20.0, step=0.1, tooltip="坏结果判定阈值。按“音频时长与文本长度之比”判断是否算失败：生成明显过短或过长时触发重试。"),
                 io.Boolean.Input("torch_compile", default=False, label_on="编译加速", label_off="标准", tooltip="开启 torch.compile 加速。第一次运行需要编译、会比较慢，之后的运行会明显更快。"),
+                io.Combo.Input("asr_backend", options=ASR_BACKEND_OPTIONS, default="embedded", tooltip="自动转写的后端。embedded 用 ComfyUI 进程内的 FunASR（旧行为）；http 走本机 127.0.0.1 上的 ASR Sidecar；auto 先试 embedded，失败再走 Sidecar。ComfyUI 是 Python 3.13、装不上 funasr 时请用 http。"),
+                io.String.Input("asr_server_url", default=DEFAULT_ASR_SERVER_URL, tooltip="ASR Sidecar 地址，默认 http://127.0.0.1:8765。它是用 Python 3.12 单独启动的本机服务（tools/asr_sidecar.py），只监听 127.0.0.1，适合 Python 3.13 的 ComfyUI。仅当 asr_backend 为 http 或 auto 时才会使用。"),
             ],
             outputs=[
                 io.Audio.Output(display_name="克隆音频"),
@@ -353,7 +360,8 @@ class VoxCPM2CloneNode(io.ComfyNode):
     def execute(cls, model_name, lora_name, device, text, cfg_value, inference_timesteps,
                 max_tokens, normalize_text, enable_denoiser, seed, force_offload,
                 enable_asr, retry_max_attempts, retry_threshold, torch_compile,
-                reference_audio=None, prompt_text=None, voice_description="", dtype="auto", **kwargs):
+                reference_audio=None, prompt_text=None, voice_description="", dtype="auto",
+                asr_backend="embedded", asr_server_url=DEFAULT_ASR_SERVER_URL, **kwargs):
 
         # Voice description handling
         has_voice_desc = bool(voice_description and voice_description.strip())
@@ -376,17 +384,35 @@ class VoxCPM2CloneNode(io.ComfyNode):
         # Validate reference audio duration
         _validate_reference_audio_duration(ref_wav_path)
 
-        # ASR auto-transcription: only when no prompt_text is provided
+        # ASR auto-transcription: only when no prompt_text is provided.
+        # A failure here is surfaced instead of silently degrading to
+        # controllable cloning, because the user explicitly asked for ASR.
         if enable_asr and (not prompt_text or not prompt_text.strip()):
-            logger.info("Running ASR on reference audio...")
+            asr = ASRTranscriber(
+                asr_backend,
+                asr_server_url,
+                embedded_transcriber=transcribe_audio,
+            )
             try:
-                prompt_text = transcribe_audio(ref_wav_path)
-                if prompt_text:
-                    logger.info(f"ASR result: {prompt_text[:80]}{'...' if len(prompt_text) > 80 else ''}")
-                else:
-                    logger.warning("ASR returned empty transcript. Proceeding without transcript.")
-            except Exception as e:
-                logger.warning(f"ASR failed: {e}. Proceeding without transcript.")
+                logger.info(f"Running ASR on reference audio (backend: {asr.describe()})...")
+                prompt_text = asr.transcribe(ref_wav_path)
+                if not prompt_text.strip():
+                    raise ValueError(
+                        f"ASR backend '{asr.last_backend or asr.requested_backend}' returned an empty "
+                        "transcript. Ultimate cloning would silently degrade to controllable cloning, "
+                        "so this run was aborted. Check the reference audio, or fill prompt_text manually."
+                    )
+            except Exception:
+                try:
+                    os.unlink(ref_wav_path)
+                except OSError:
+                    pass
+                raise
+
+            logger.info(
+                f"ASR transcript ready via {asr.last_backend or 'unknown'} backend "
+                f"({len(prompt_text)} chars): {prompt_text[:80]}{'...' if len(prompt_text) > 80 else ''}"
+            )
         elif enable_asr and prompt_text and prompt_text.strip():
             logger.info("ASR enabled but prompt_text already provided — using manual transcript instead.")
 

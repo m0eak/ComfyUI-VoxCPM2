@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import tempfile
 import time
@@ -11,6 +12,11 @@ import torchaudio
 from comfy_api.latest import io
 import comfy.model_management as model_management
 
+from .modules.asr_backend import (
+    ASR_BACKEND_OPTIONS,
+    DEFAULT_ASR_SERVER_URL,
+    ASRTranscriber,
+)
 from .modules.model_info import AVAILABLE_VOXCPM_MODELS
 from .modules.srt_audio_utils import (
     get_audio_duration_seconds,
@@ -42,6 +48,8 @@ from .voxcpm2_nodes import (
 
 
 DEFAULT_CONSISTENCY_PROMPT = "保持同一个说话人的音色、音量、语速和语气稳定一致，使用自然连贯的旁白风格。"
+
+logger = logging.getLogger(__name__)
 
 
 def _available_model_names() -> list[str]:
@@ -191,6 +199,8 @@ def _build_srt_tts_common_inputs(model_names: list[str], devices: list[str], def
         io.Int.Input("silence_keep_start_ms", default=80, min=0, max=500, step=10, tooltip="保留开头静音：裁剪后仍然在声音前留这么多毫秒，避免第一个字被削掉。"),
         io.Int.Input("silence_keep_end_ms", default=120, min=0, max=1000, step=10, tooltip="保留结尾静音：裁剪后仍然在尾音后留这么多毫秒，避免听感太突兀。"),
         io.Boolean.Input("use_srt_name_prefix", default=True, label_on="SRT 前缀", label_off="无前缀", tooltip="用 SRT 文件名作为 WAV 前缀（如 教程01_0001.wav）。多个任务素材混在一个工程里时开启，可避免 Premiere 串素材。"),
+        io.Combo.Input("asr_backend", options=ASR_BACKEND_OPTIONS, default="embedded", tooltip="自动转写的后端。embedded 用 ComfyUI 进程内的 FunASR（旧行为）；http 走本机 127.0.0.1 上的 ASR Sidecar；auto 先试 embedded，失败再走 Sidecar。ComfyUI 是 Python 3.13、装不上 funasr 时请用 http。"),
+        io.String.Input("asr_server_url", default=DEFAULT_ASR_SERVER_URL, tooltip="ASR Sidecar 地址，默认 http://127.0.0.1:8765。它是用 Python 3.12 单独启动的本机服务（tools/asr_sidecar.py），只监听 127.0.0.1，适合 Python 3.13 的 ComfyUI。仅当 asr_backend 为 http 或 auto 时才会使用。"),
     ]
 
 
@@ -283,7 +293,8 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 clone_mode="auto", export_premiere_xml=True, timeline_fps=30,
                 trim_start_ms=100, auto_trim_silence=False, silence_threshold_db=-45.0,
                 silence_min_duration_ms=200, silence_keep_start_ms=80, silence_keep_end_ms=120,
-                use_srt_name_prefix=True, reference_audio=None, **kwargs):
+                use_srt_name_prefix=True, reference_audio=None,
+                asr_backend="embedded", asr_server_url=DEFAULT_ASR_SERVER_URL, **kwargs):
         trim_start_ms = max(0, min(2000, int(trim_start_ms or 0)))
         auto_trim_silence = bool(auto_trim_silence)
         silence_threshold_db = max(-80.0, min(-20.0, float(silence_threshold_db)))
@@ -293,6 +304,12 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
         clone_mode = str(clone_mode or "controllable").strip()
         if clone_mode not in ("controllable", "ultimate", "auto"):
             clone_mode = "controllable"
+
+        asr_transcriber = ASRTranscriber(
+            asr_backend,
+            asr_server_url,
+            embedded_transcriber=transcribe_audio,
+        )
 
         if not isinstance(segments, dict) or not segments.get("segments"):
             raise ValueError("SRT segments are required. Connect VoxCPM2 SRT Parser output.")
@@ -324,6 +341,8 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
             "seed": int(seed),
             "seed_strategy": seed_strategy,
             "enable_asr": bool(enable_asr),
+            "asr_backend": asr_transcriber.requested_backend,
+            "asr_server_url": asr_transcriber.server_url,
             "enable_denoiser": bool(enable_denoiser),
             "trim_start_ms": trim_start_ms,
             "auto_trim_silence": auto_trim_silence,
@@ -359,6 +378,12 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
 
         ref_wav_path = None
         try:
+            if enable_asr:
+                logger.info(
+                    "[ASR] SRT job %s: reference transcription backend %s",
+                    job_dir.name,
+                    asr_transcriber.describe(),
+                )
             ref_wav_path, prompt_text = prepare_reference_audio(
                 reference_audio,
                 clone_mode,
@@ -366,8 +391,33 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 prompt_text,
                 save_audio_to_temp=_save_audio_to_temp,
                 validate_reference_audio_duration=_validate_reference_audio_duration,
-                transcribe_audio=transcribe_audio,
+                transcribe_audio=asr_transcriber,
             )
+            if asr_transcriber.last_backend:
+                logger.info(
+                    "[ASR] SRT job %s: transcript produced by %s backend (%d chars)",
+                    job_dir.name,
+                    asr_transcriber.last_backend,
+                    len(prompt_text or ""),
+                )
+                config["asr_backend_used"] = asr_transcriber.last_backend
+                write_json(job_dir / "config.json", config)
+            elif enable_asr and clone_mode == "controllable":
+                logger.info(
+                    "[ASR] SRT job %s: clone_mode=controllable, reference audio is not transcribed.",
+                    job_dir.name,
+                )
+            else:
+                logger.info(
+                    "[ASR] SRT job %s: no transcription requested (prompt_text provided or ASR disabled).",
+                    job_dir.name,
+                )
+            if clone_mode == "ultimate" and not (prompt_text and prompt_text.strip()):
+                logger.warning(
+                    "[ASR] SRT job %s: clone_mode=ultimate but no transcript is available; "
+                    "generation will fall back to plain voice cloning.",
+                    job_dir.name,
+                )
 
             patcher = _load_patcher(model_name, device, torch_compile, dtype)
             model_management.load_model_gpu(patcher)
@@ -587,7 +637,7 @@ class VoxCPM2SRTBatchTTSNode(io.ComfyNode):
                 VOXCPM_PATCHER_CACHE.pop(cache_key, None)
                 offload_asr()
 
-            status = f"SRT 批量配音完成：任务目录 {job_dir} | 成功 {success} 段 | 失败 {failed} 段 | 开头裁剪 {trim_start_ms} 毫秒 | 自动静音裁剪 {'开启' if auto_trim_silence else '关闭'}"
+            status = f"SRT 批量配音完成：任务目录 {job_dir} | 成功 {success} 段 | 失败 {failed} 段 | 开头裁剪 {trim_start_ms} 毫秒 | 自动静音裁剪 {'开启' if auto_trim_silence else '关闭'} | ASR 后端 {asr_transcriber.last_backend or '未使用'}"
             result_payload = {
                 "job_dir": str(job_dir),
                 "manifest_path": str(manifest_path),
@@ -638,7 +688,8 @@ class VoxCPM2SRTSingleLineTTSNode(io.ComfyNode):
                 clone_mode="auto", export_premiere_xml=True, timeline_fps=30,
                 trim_start_ms=100, auto_trim_silence=False, silence_threshold_db=-45.0,
                 silence_min_duration_ms=200, silence_keep_start_ms=80, silence_keep_end_ms=120,
-                use_srt_name_prefix=True, reference_audio=None, **kwargs):
+                use_srt_name_prefix=True, reference_audio=None,
+                asr_backend="embedded", asr_server_url=DEFAULT_ASR_SERVER_URL, **kwargs):
         clean_text = str(text or "").strip()
         if not clean_text:
             raise ValueError("Text is required for single line TTS.")
@@ -652,6 +703,12 @@ class VoxCPM2SRTSingleLineTTSNode(io.ComfyNode):
         clone_mode = str(clone_mode or "controllable").strip()
         if clone_mode not in ("controllable", "ultimate", "auto"):
             clone_mode = "controllable"
+
+        asr_transcriber = ASRTranscriber(
+            asr_backend,
+            asr_server_url,
+            embedded_transcriber=transcribe_audio,
+        )
 
         output_base = Path(str(output_dir).strip()) if output_dir and str(output_dir).strip() else Path(folder_paths.get_output_directory())
         output_base.mkdir(parents=True, exist_ok=True)
@@ -674,6 +731,8 @@ class VoxCPM2SRTSingleLineTTSNode(io.ComfyNode):
 
         ref_wav_path = None
         try:
+            if enable_asr:
+                logger.info("[ASR] single line TTS: reference transcription backend %s", asr_transcriber.describe())
             ref_wav_path, prompt_text = prepare_reference_audio(
                 reference_audio,
                 clone_mode,
@@ -681,8 +740,19 @@ class VoxCPM2SRTSingleLineTTSNode(io.ComfyNode):
                 prompt_text,
                 save_audio_to_temp=_save_audio_to_temp,
                 validate_reference_audio_duration=_validate_reference_audio_duration,
-                transcribe_audio=transcribe_audio,
+                transcribe_audio=asr_transcriber,
             )
+            if asr_transcriber.last_backend:
+                logger.info(
+                    "[ASR] single line TTS: transcript produced by %s backend (%d chars)",
+                    asr_transcriber.last_backend,
+                    len(prompt_text or ""),
+                )
+            if clone_mode == "ultimate" and not (prompt_text and prompt_text.strip()):
+                logger.warning(
+                    "[ASR] single line TTS: clone_mode=ultimate but no transcript is available; "
+                    "generation will fall back to plain voice cloning."
+                )
 
             patcher = _load_patcher(model_name, device, torch_compile, dtype)
             model_management.load_model_gpu(patcher)
@@ -757,6 +827,7 @@ class VoxCPM2SRTSingleLineTTSNode(io.ComfyNode):
                 "model_name": model_name,
                 "lora_name": lora_name,
                 "mode": mode,
+                "asr_backend_used": asr_transcriber.last_backend,
                 "seed": actual_seed,
                 "cfg_value": float(cfg_value),
                 "inference_timesteps": int(inference_timesteps),
@@ -770,7 +841,7 @@ class VoxCPM2SRTSingleLineTTSNode(io.ComfyNode):
                 "status": "ok",
                 "message": "Done",
             }
-            status = f"单句配音完成：{out_path} | 时长 {duration:.2f} 秒 | 模式 {mode}"
+            status = f"单句配音完成：{out_path} | 时长 {duration:.2f} 秒 | 模式 {mode} | ASR 后端 {asr_transcriber.last_backend or '未使用'}"
             return io.NodeOutput(str(out_path), float(duration), status, item)
         finally:
             if ref_wav_path:
@@ -817,6 +888,7 @@ class VoxCPM2SRTFolderBatchTTSNode(io.ComfyNode):
                 auto_trim_silence=False, silence_threshold_db=-45.0,
                 silence_min_duration_ms=200, silence_keep_start_ms=80,
                 silence_keep_end_ms=120, use_srt_name_prefix=True, reference_audio=None,
+                asr_backend="embedded", asr_server_url=DEFAULT_ASR_SERVER_URL,
                 **kwargs):
         srt_files = _scan_srt_files(srt_folder_path, bool(recursive))
         if not srt_files:
@@ -848,6 +920,8 @@ class VoxCPM2SRTFolderBatchTTSNode(io.ComfyNode):
                     silence_keep_end_ms=silence_keep_end_ms,
                     use_srt_name_prefix=use_srt_name_prefix,
                     reference_audio=reference_audio,
+                    asr_backend=asr_backend,
+                    asr_server_url=asr_server_url,
                 )
                 job_dir = root_output_dir / srt_name
                 jobs.append({
